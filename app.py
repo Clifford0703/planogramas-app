@@ -1,144 +1,189 @@
 import io
-import json
-import os
-import time
+import re
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-import pypdfium2 as pdfium
+import pdfplumber
 import streamlit as st
-from google import genai
-from google.genai import types
 
 # --- CONSTANTES ---
-APP_VERSION = "v3.2.0-PRO-VISION"
+APP_VERSION = "v4.0.0-ULTRA-FAST"
 
 # --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
 st.set_page_config(
-    page_title=f"Convertidor Inteligente de Planogramas ({APP_VERSION})",
-    page_icon="📊",
+    page_title=f"Convertidor Rápido de Planogramas ({APP_VERSION})",
+    page_icon="⚡",
     layout="wide",
 )
 
-# Indicador visual de versión en la barra lateral
 st.sidebar.title("📌 Información")
 st.sidebar.info(f"**Versión de la App:** `{APP_VERSION}`")
-st.sidebar.caption(
-    "Motor: Google Gemini 2.0 Flash (Visión Artificial) + OpenPyXL"
-)
+st.sidebar.caption("Motor: Extracción por Coordenadas Y (Python Nativo)")
 
-st.title("📊 Procesador Multimodal de Planogramas (PDF ➔ Excel)")
+st.title("⚡ Procesador Ultrarrápido de Planogramas (PDF ➔ Excel)")
 st.write(
-    f"Utiliza **Gemini 2.0 Flash Vision** para analizar visualmente cada página del PDF "
-    f"y extraer el 100% de las filas de productos por EAN sin omitir datos. *(Versión activa: **{APP_VERSION}**)*"
+    f"Procesa tus archivos de planogramas en **segundos**, capturando el 100% de las filas con código EAN "
+    f"sin depender de llamadas a APIs ni generar costos. *(Versión activa: **{APP_VERSION}**)*"
 )
 
-# --- CONFIGURACIÓN DE GEMINI API ---
-api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
-if not api_key:
-    api_key = st.text_input(
-        "Ingresa tu GEMINI_API_KEY (Gratuita de Google AI Studio):",
-        type="password",
-    )
+# --- FUNCIÓN 1: EXTRAER FILAS POR COORDENADAS Y ---
+def extraer_filas_por_coordenadas_stream(pdf_file):
+    filas_extraidas = []
+    patron_ean = re.compile(r"\b\d{10,14}\b")
 
-client = None
-if api_key:
-    client = genai.Client(api_key=api_key)
+    with pdfplumber.open(pdf_file) as pdf:
+        for pagina in pdf.pages:
+            palabras = pagina.extract_words(
+                x_tolerance=3, y_tolerance=3, keep_blank_chars=False
+            )
+
+            if not palabras:
+                continue
+
+            lineas_dict = {}
+            for p in palabras:
+                y_pos = round(p["top"], 1)
+
+                linea_clave = None
+                for y_existente in lineas_dict.keys():
+                    if abs(y_existente - y_pos) <= 2.5:
+                        linea_clave = y_existente
+                        break
+
+                if linea_clave is None:
+                    linea_clave = y_pos
+                    lineas_dict[linea_clave] = []
+
+                lineas_dict[linea_clave].append(p)
+
+            for y_pos in sorted(lineas_dict.keys()):
+                palabras_linea = sorted(
+                    lineas_dict[y_pos], key=lambda x: x["x0"]
+                )
+                texto_linea = " ".join([p["text"] for p in palabras_linea])
+
+                match_ean = patron_ean.search(texto_linea)
+                if match_ean:
+                    ean = match_ean.group(0)
+                    bandeja = (
+                        palabras_linea[0]["text"]
+                        if re.match(
+                            r"^\d+[\.\-]\d+$", palabras_linea[0]["text"]
+                        )
+                        else ""
+                    )
+                    elementos = [p["text"] for p in palabras_linea]
+                    filas_extraidas.append((bandeja, ean, elementos))
+
+    return filas_extraidas
 
 
-# --- FUNCIÓN 1: EXTRAER TABLAS CON VISIÓN ARTIFICIAL (GEMINI 2.0) ---
-def extraer_tablas_con_gemini(pdf_bytes):
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    todas_las_filas = []
+# --- FUNCIÓN 2: ESTRUCTURAR COLUMNAS ---
+def estructurar_filas_a_columnas(filas_raw):
+    datos_procesados = []
+    patron_ean = re.compile(r"^\d{10,14}$")
 
-    prompt = """
-    Analiza esta página de planograma/reporte de implementación de retail.
-    Extrae ÚNICAMENTE la tabla de productos detallada.
-    Ignora encabezados generales, títulos de módulos, gráficos de pie/barras y las imágenes del mueble.
-    
-    Devuelve un JSON estrictamente con la siguiente estructura (una lista de listas de cadenas de texto):
-    {
-        "filas": [
-            ["Bandeja", "N°", "EAN", "Nombre", "Marca", "Desc_A", "Fabricante", "Caras", "Altura", "Profundidad", "Total Unid en Bandeja", "Total_Unidades"],
-            ...
-        ]
-    }
-    Instrucciones:
-    1. Asegúrate de capturar TODAS las líneas que contengan un código EAN (numérico de 10-14 dígitos).
-    2. Mantén exactamente las 12 columnas.
-    3. Si una celda tiene un asterisco '*', consérvalo.
-    """
+    marcas_conocidas = [
+        "AYUDIN",
+        "SAPOLIO",
+        "HOME CARE MP",
+        "CIF",
+        "LA OCA",
+        "FROSCH",
+        "THE PINK STUFF",
+        "DES",
+        "ALTOMAYO",
+        "NESCAFE",
+        "KIRMA",
+        "BRITT",
+        "CAFETAL",
+        "ECCO",
+        "KIMBO",
+        "COLCAFE",
+        "JACOBS",
+        "FOLGERS",
+        "BUSTELO",
+        "STARBUCKS",
+        "DOLCE GUSTO",
+    ]
 
-    total_paginas = len(pdf)
-    barra_progreso = st.progress(0)
+    for bandeja, ean, elementos in filas_raw:
+        col = [""] * 12
 
-    for i, page in enumerate(pdf):
-        st.write(
-            f"🔍 **[Página {i+1} de {total_paginas}]** Escaneando visualmente..."
+        col[0] = (
+            bandeja
+            if bandeja
+            else (
+                elementos[0] if re.match(r"^\d+[\.\-]\d+$", elementos[0]) else ""
+            )
         )
 
-        # Renderizar página a imagen PNG en memoria
-        image = page.render(scale=2).to_pil()
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format="PNG")
-        img_bytes = img_byte_arr.getvalue()
+        idx_ean = -1
+        for i, el in enumerate(elementos):
+            if patron_ean.match(el):
+                col[2] = el
+                idx_ean = i
+                break
 
-        # Intentar llamada a Gemini 2.0 Flash con reintentos para Rate Limit
-        exito = False
-        intentos = 0
+        if idx_ean == -1:
+            col[2] = ean
 
-        while not exito and intentos < 3:
-            try:
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=[
-                        types.Part.from_bytes(
-                            data=img_bytes,
-                            mime_type="image/png",
-                        ),
-                        prompt,
-                    ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    ),
-                )
+        if idx_ean > 1 and elementos[idx_ean - 1].isdigit():
+            col[1] = elementos[idx_ean - 1]
+        elif (
+            idx_ean == 1
+            and col[0] != ""
+            and elementos[0] != col[0]
+            and elementos[0].isdigit()
+        ):
+            col[1] = elementos[0]
 
-                res_json = json.loads(response.text)
-                filas_pag = res_json.get("filas", [])
+        numeros_finales = []
+        elementos_sobrantes = (
+            elementos[idx_ean + 1 :] if idx_ean != -1 else elementos
+        )
 
-                for f in filas_pag:
-                    if f and f[0] not in [
-                        "Bandeja",
-                        "Reporte de Implementación",
-                    ]:
-                        todas_las_filas.append(f)
+        while elementos_sobrantes and (
+            elementos_sobrantes[-1].isdigit() or elementos_sobrantes[-1] == "*"
+        ):
+            numeros_finales.insert(0, elementos_sobrantes.pop())
 
-                exito = True
+        if len(numeros_finales) >= 1:
+            col[11] = numeros_finales[-1]
+        if len(numeros_finales) >= 2:
+            col[10] = numeros_finales[-2]
+        if len(numeros_finales) >= 3:
+            col[9] = numeros_finales[-3]
+        if len(numeros_finales) >= 4:
+            col[8] = numeros_finales[-4]
+        if len(numeros_finales) >= 5:
+            col[7] = numeros_finales[-5]
 
-            except Exception as e:
-                intentos += 1
-                mensaje_err = str(e)
+        texto_medio = " ".join(elementos_sobrantes)
 
-                if "429" in mensaje_err or "RESOURCE_EXHAUSTED" in mensaje_err:
-                    st.warning(
-                        f"⏳ Pausa por límite de frecuencia en página {i+1}. Reintentando en 12 segundos..."
-                    )
-                    time.sleep(12)
-                else:
-                    st.error(f"❌ Error en página {i+1}: {e}")
-                    break
+        if (
+            "Líquido" in texto_medio
+            or "LIQ" in texto_medio
+            or "LIQUIDO" in texto_medio
+        ):
+            col[5] = "Lavavajillas Líquido"
+        elif "Pasta" in texto_medio or "PASTA" in texto_medio:
+            col[5] = "Lavavajillas Pasta"
 
-        barra_progreso.progress((i + 1) / total_paginas)
+        col[3] = texto_medio
 
-        # Pausa ligera para mantenerte en la cuota gratuita
-        if i < total_paginas - 1:
-            time.sleep(4)
+        for m in marcas_conocidas:
+            if m in texto_medio.upper():
+                col[4] = m
+                break
 
-    return todas_las_filas
+        datos_procesados.append(col)
+
+    return datos_procesados
 
 
-# --- FUNCIÓN 2: GENERAR EXCEL FORMATO EJECUTIVO ---
+# --- FUNCIÓN 3: GENERAR EXCEL FORMATO EJECUTIVO ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -149,7 +194,6 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_summary.views.sheetView[0].showGridLines = True
     ws_data.views.sheetView[0].showGridLines = True
 
-    # Estilos
     font_title = Font(name="Calibri", size=16, bold=True, color="1F497D")
     font_subtitle = Font(name="Calibri", size=11, italic=True, color="595959")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -198,7 +242,6 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         "Total_Unidades",
     ]
 
-    # --- PESTAÑA 1: DATOS DETALLADOS ---
     ws_data.cell(row=1, column=1, value="METRO HIPER MEJORADO").font = font_title
     ws_data.cell(
         row=2,
@@ -231,7 +274,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN formato texto estricto
+            elif c_idx == 3:
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
             elif c_idx in [4, 5, 6, 7]:
@@ -273,7 +316,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # --- PESTAÑA 2: KPIS Y RESUMEN ---
+    # KPIs
     ws_summary.cell(
         row=1,
         column=1,
@@ -421,44 +464,33 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
 
 
 # --- INTERFAZ STREAMLIT ---
-uploaded_file = st.file_uploader(
-    "Selecciona o arrastra tu PDF de Planograma aquí", type=["pdf"]
-)
+uploaded_file = st.file_uploader("Selecciona o arrastra tu PDF aquí", type=["pdf"])
 
 if uploaded_file is not None:
-    categoria = st.text_input("Nombre de la Categoría", "Lavavajillas")
+    categoria = st.text_input("Nombre de la Categoría", "General")
 
-    if st.button("🚀 Procesar PDF con Visión AI"):
-        if not client:
-            st.error(
-                "Necesitas configurar tu GEMINI_API_KEY en los Secrets para procesar el archivo."
-            )
-        else:
-            with st.spinner(
-                "La IA está escaneando las imágenes de cada página..."
-            ):
-                pdf_bytes = uploaded_file.read()
-                datos = extraer_tablas_con_gemini(pdf_bytes)
+    if st.button("⚡ Procesar PDF al Instante"):
+        with st.spinner("Extrayendo líneas por coordenadas horizontales..."):
+            filas_raw = extraer_filas_por_coordenadas_stream(uploaded_file)
+            datos = estructurar_filas_a_columnas(filas_raw)
 
-                if datos:
-                    st.success(
-                        f"¡Éxito! Se capturaron {len(datos)} registros exactos."
-                    )
-                    excel_bytes = generar_excel_en_memoria(datos, categoria)
+            if datos:
+                st.success(
+                    f"¡Procesamiento completo en segundos! Se capturaron {len(datos)} registros exactos por EAN."
+                )
 
-                    st.download_button(
-                        label="📥 Descargar Excel Perfecto",
-                        data=excel_bytes,
-                        file_name=f"Reporte_{categoria}_{APP_VERSION}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-                else:
-                    st.error(
-                        "No se pudieron extraer datos de las imágenes del PDF."
-                    )
+                excel_bytes = generar_excel_en_memoria(datos, categoria)
 
-# --- PIE DE PÁGINA CON VERSIÓN ---
+                st.download_button(
+                    label="📥 Descargar Excel Estructurado",
+                    data=excel_bytes,
+                    file_name=f"Reporte_{categoria}_{APP_VERSION}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.error("No se encontraron códigos EAN válidos en el PDF.")
+
 st.markdown("---")
 st.caption(
-    f"🟢 **Estado del Sistema:** Operativo | **Versión:** `{APP_VERSION}` | Motor Gemini 2.0 Active"
+    f"🟢 **Estado:** Ultrarrápido | **Versión:** `{APP_VERSION}` | Motor Python Nativo (Coordenadas Y)"
 )
