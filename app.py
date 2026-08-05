@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -18,12 +19,11 @@ st.set_page_config(
 
 st.title("📊 Procesador Multimodal de Planogramas (PDF ➔ Excel)")
 st.write(
-    "Utiliza la API gratuita de **Gemini Vision** para analizar visualmente cada página del PDF "
+    "Utiliza la API de **Gemini Vision** para analizar visualmente cada página del PDF "
     "y extraer el 100% de las tablas sin omitir ninguna fila por EAN."
 )
 
 # --- CONFIGURACIÓN DE GEMINI API ---
-# Intenta obtener la clave desde los Secrets de Streamlit o desde el entorno
 api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 if not api_key:
@@ -43,7 +43,7 @@ def extraer_tablas_con_gemini(pdf_bytes):
 
     prompt = """
     Analiza esta página de planograma/reporte de implementación de retail.
-    Extrae ÚNICAMENTE la tabla de productos detalada.
+    Extrae ÚNICAMENTE la tabla de productos detallada.
     Ignora encabezados generales, títulos de módulos, gráficos de pie/barras y las imágenes del mueble.
     
     Devuelve un JSON estrictamente con la siguiente estructura (una lista de listas de cadenas de texto):
@@ -56,21 +56,27 @@ def extraer_tablas_con_gemini(pdf_bytes):
     Instrucciones:
     1. Asegúrate de capturar TODAS las líneas que contengan un código EAN (numérico de 10-14 dígitos).
     2. Mantén exactamente las 12 columnas.
-    3. Si una celda tiene un asterisco '*', conservalo.
+    3. Si una celda tiene un asterisco '*', consérvalo.
     """
 
+    total_paginas = len(pdf)
+    barra_progreso = st.progress(0)
+
     for i, page in enumerate(pdf):
-        st.write(f"🔍 Analizando visualmente la página {i+1} de {len(pdf)}...")
+        st.write(
+            f"🔍 Analizando visualmente página {i+1} de {total_paginas}..."
+        )
+
         # Renderizar página a imagen PNG en memoria
         image = page.render(scale=2).to_pil()
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format="PNG")
         img_bytes = img_byte_arr.getvalue()
 
-        # Llamar a Gemini Vision
+        # Llamar a Gemini Vision usando el modelo activo gemini-1.5-flash
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-1.5-flash",
                 contents=[
                     types.Part.from_bytes(
                         data=img_bytes,
@@ -87,12 +93,19 @@ def extraer_tablas_con_gemini(pdf_bytes):
             filas_pag = res_json.get("filas", [])
 
             for f in filas_pag:
-                # Evitar agregar el encabezado repetido
+                # Evitar agregar encabezados repetidos
                 if f and f[0] not in ["Bandeja", "Reporte de Implementación"]:
                     todas_las_filas.append(f)
 
         except Exception as e:
             st.error(f"Error procesando la página {i+1}: {e}")
+
+        # Actualizar progreso
+        barra_progreso.progress((i + 1) / total_paginas)
+
+        # Pausa estratégica para no superar el límite gratuito de 5 peticiones por minuto (RPM)
+        if i < total_paginas - 1:
+            time.sleep(13)
 
     return todas_las_filas
 
@@ -391,7 +404,7 @@ if uploaded_file is not None:
             )
         else:
             with st.spinner(
-                "La IA está leyendo y escaneando las imágenes del PDF..."
+                "La IA está escaneando las imágenes de cada página..."
             ):
                 pdf_bytes = uploaded_file.read()
                 datos = extraer_tablas_con_gemini(pdf_bytes)
