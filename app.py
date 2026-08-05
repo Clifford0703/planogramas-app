@@ -6,48 +6,46 @@ from openpyxl.utils import get_column_letter
 import pdfplumber
 import streamlit as st
 
-# --- CONSTANTES ---
-APP_VERSION = "v4.0.0-ULTRA-FAST"
-
 # --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
 st.set_page_config(
-    page_title=f"Convertidor Rápido de Planogramas ({APP_VERSION})",
-    page_icon="⚡",
-    layout="wide",
+    page_title="Convertidor de Planogramas a Excel",
+    page_icon="📊",
+    layout="centered",
 )
 
-st.sidebar.title("📌 Información")
-st.sidebar.info(f"**Versión de la App:** `{APP_VERSION}`")
-st.sidebar.caption("Motor: Extracción por Coordenadas Y (Python Nativo)")
-
-st.title("⚡ Procesador Ultrarrápido de Planogramas (PDF ➔ Excel)")
+# --- CABECERA Y TÍTULO ---
+st.title("📊 Convertidor de Planogramas a Excel")
 st.write(
-    f"Procesa tus archivos de planogramas en **segundos**, capturando el 100% de las filas con código EAN "
-    f"sin depender de llamadas a APIs ni generar costos. *(Versión activa: **{APP_VERSION}**)*"
+    "Sube tu archivo PDF de implementación para generar automáticamente "
+    "el reporte en Excel con todas las columnas organizadas y estructuradas."
 )
 
+# --- PANEL LATERAL ---
+st.sidebar.title("📌 Información")
+st.sidebar.write("**Autor:** Alfredo HM")
+st.sidebar.write("**Estado:** Listo para procesar")
 
-# --- FUNCIÓN 1: EXTRAER FILAS POR COORDENADAS Y ---
-def extraer_filas_por_coordenadas_stream(pdf_file):
-    filas_extraidas = []
+
+# --- FUNCIÓN DE EXTRACCIÓN DE DATOS ---
+def extraer_tabla_exacta_stream(pdf_file):
+    datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
 
     with pdfplumber.open(pdf_file) as pdf:
         for pagina in pdf.pages:
-            palabras = pagina.extract_words(
+            words = pagina.extract_words(
                 x_tolerance=3, y_tolerance=3, keep_blank_chars=False
             )
-
-            if not palabras:
+            if not words:
                 continue
 
+            # Agrupar por líneas (coordenada Y)
             lineas_dict = {}
-            for p in palabras:
-                y_pos = round(p["top"], 1)
-
+            for w in words:
+                y_pos = round(w["top"], 1)
                 linea_clave = None
                 for y_existente in lineas_dict.keys():
-                    if abs(y_existente - y_pos) <= 2.5:
+                    if abs(y_existente - y_pos) <= 3.0:
                         linea_clave = y_existente
                         break
 
@@ -55,135 +53,80 @@ def extraer_filas_por_coordenadas_stream(pdf_file):
                     linea_clave = y_pos
                     lineas_dict[linea_clave] = []
 
-                lineas_dict[linea_clave].append(p)
+                lineas_dict[linea_clave].append(w)
 
+            ancho_pag = pagina.width
+
+            # Asignar palabras a columnas según su posición horizontal (X)
             for y_pos in sorted(lineas_dict.keys()):
-                palabras_linea = sorted(
-                    lineas_dict[y_pos], key=lambda x: x["x0"]
+                words_linea = sorted(
+                    lineas_dict[y_pos], key=lambda item: item["x0"]
                 )
-                texto_linea = " ".join([p["text"] for p in palabras_linea])
+                texto_linea = " ".join([w["text"] for w in words_linea])
 
                 match_ean = patron_ean.search(texto_linea)
-                if match_ean:
-                    ean = match_ean.group(0)
-                    bandeja = (
-                        palabras_linea[0]["text"]
-                        if re.match(
-                            r"^\d+[\.\-]\d+$", palabras_linea[0]["text"]
-                        )
-                        else ""
-                    )
-                    elementos = [p["text"] for p in palabras_linea]
-                    filas_extraidas.append((bandeja, ean, elementos))
+                if not match_ean:
+                    continue
 
-    return filas_extraidas
+                col = [""] * 12
+                txt_nombre, txt_marca, txt_desc, txt_fabricante = [], [], [], []
 
+                for w in words_linea:
+                    x0 = w["x0"]
+                    text = w["text"]
+                    x_rel = x0 / ancho_pag
 
-# --- FUNCIÓN 2: ESTRUCTURAR COLUMNAS ---
-def estructurar_filas_a_columnas(filas_raw):
-    datos_procesados = []
-    patron_ean = re.compile(r"^\d{10,14}$")
+                    if x_rel < 0.08:
+                        if not col[0]:
+                            col[0] = text
+                    elif x_rel < 0.12:
+                        if text.isdigit() and not col[1]:
+                            col[1] = text
+                        elif not col[0]:
+                            col[0] = text
+                    elif x_rel < 0.22:
+                        if patron_ean.match(text):
+                            col[2] = text
+                        elif not col[2] and text.isdigit():
+                            col[2] = text
+                    elif x_rel < 0.42:
+                        txt_nombre.append(text)
+                    elif x_rel < 0.52:
+                        txt_marca.append(text)
+                    elif x_rel < 0.62:
+                        txt_desc.append(text)
+                    elif x_rel < 0.78:
+                        txt_fabricante.append(text)
+                    elif x_rel < 0.82:
+                        if not col[7]:
+                            col[7] = text
+                    elif x_rel < 0.86:
+                        if not col[8]:
+                            col[8] = text
+                    elif x_rel < 0.90:
+                        if not col[9]:
+                            col[9] = text
+                    elif x_rel < 0.95:
+                        if not col[10]:
+                            col[10] = text
+                    else:
+                        if not col[11]:
+                            col[11] = text
 
-    marcas_conocidas = [
-        "AYUDIN",
-        "SAPOLIO",
-        "HOME CARE MP",
-        "CIF",
-        "LA OCA",
-        "FROSCH",
-        "THE PINK STUFF",
-        "DES",
-        "ALTOMAYO",
-        "NESCAFE",
-        "KIRMA",
-        "BRITT",
-        "CAFETAL",
-        "ECCO",
-        "KIMBO",
-        "COLCAFE",
-        "JACOBS",
-        "FOLGERS",
-        "BUSTELO",
-        "STARBUCKS",
-        "DOLCE GUSTO",
-    ]
+                col[3] = " ".join(txt_nombre).strip()
+                col[4] = " ".join(txt_marca).strip()
+                col[5] = " ".join(txt_desc).strip()
+                col[6] = " ".join(txt_fabricante).strip()
 
-    for bandeja, ean, elementos in filas_raw:
-        col = [""] * 12
+                if not col[2]:
+                    col[2] = match_ean.group(0)
 
-        col[0] = (
-            bandeja
-            if bandeja
-            else (
-                elementos[0] if re.match(r"^\d+[\.\-]\d+$", elementos[0]) else ""
-            )
-        )
-
-        idx_ean = -1
-        for i, el in enumerate(elementos):
-            if patron_ean.match(el):
-                col[2] = el
-                idx_ean = i
-                break
-
-        if idx_ean == -1:
-            col[2] = ean
-
-        if idx_ean > 1 and elementos[idx_ean - 1].isdigit():
-            col[1] = elementos[idx_ean - 1]
-        elif (
-            idx_ean == 1
-            and col[0] != ""
-            and elementos[0] != col[0]
-            and elementos[0].isdigit()
-        ):
-            col[1] = elementos[0]
-
-        numeros_finales = []
-        elementos_sobrantes = (
-            elementos[idx_ean + 1 :] if idx_ean != -1 else elementos
-        )
-
-        while elementos_sobrantes and (
-            elementos_sobrantes[-1].isdigit() or elementos_sobrantes[-1] == "*"
-        ):
-            numeros_finales.insert(0, elementos_sobrantes.pop())
-
-        if len(numeros_finales) >= 1:
-            col[11] = numeros_finales[-1]
-        if len(numeros_finales) >= 2:
-            col[10] = numeros_finales[-2]
-        if len(numeros_finales) >= 3:
-            col[9] = numeros_finales[-3]
-        if len(numeros_finales) >= 4:
-            col[8] = numeros_finales[-4]
-        if len(numeros_finales) >= 5:
-            col[7] = numeros_finales[-5]
-
-        texto_medio = " ".join(elementos_sobrantes)
-
-        if (
-            "Líquido" in texto_medio
-            or "LIQ" in texto_medio
-            or "LIQUIDO" in texto_medio
-        ):
-            col[5] = "Lavavajillas Líquido"
-        elif "Pasta" in texto_medio or "PASTA" in texto_medio:
-            col[5] = "Lavavajillas Pasta"
-
-        col[3] = texto_medio
-
-        for m in marcas_conocidas:
-            if m in texto_medio.upper():
-                col[4] = m
-                break
-
-        datos_procesados.append(col)
+                datos_procesados.append(col)
 
     return datos_procesados
 
 
-# --- FUNCIÓN 3: GENERAR EXCEL FORMATO EJECUTIVO ---
+# --- FUNCIÓN DE GENERACIÓN DE EXCEL ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -316,7 +259,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # KPIs
+    # PESTAÑA RESUMEN
     ws_summary.cell(
         row=1,
         column=1,
@@ -463,34 +406,31 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     return output
 
 
-# --- INTERFAZ STREAMLIT ---
-uploaded_file = st.file_uploader("Selecciona o arrastra tu PDF aquí", type=["pdf"])
+# --- INTERFAZ USUARIO ---
+uploaded_file = st.file_uploader("Arrastra tu PDF aquí", type=["pdf"])
 
 if uploaded_file is not None:
-    categoria = st.text_input("Nombre de la Categoría", "General")
+    categoria = st.text_input("Nombre de la Categoría (opcional)", "General")
 
-    if st.button("⚡ Procesar PDF al Instante"):
-        with st.spinner("Extrayendo líneas por coordenadas horizontales..."):
-            filas_raw = extraer_filas_por_coordenadas_stream(uploaded_file)
-            datos = estructurar_filas_a_columnas(filas_raw)
+    if st.button("Procesar y Convertir a Excel"):
+        with st.spinner("Procesando documento..."):
+            datos = extraer_tabla_exacta_stream(uploaded_file)
 
             if datos:
                 st.success(
-                    f"¡Procesamiento completo en segundos! Se capturaron {len(datos)} registros exactos por EAN."
+                    f"¡Listo! Se extrajeron {len(datos)} filas correctamente."
                 )
-
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
 
                 st.download_button(
-                    label="📥 Descargar Excel Estructurado",
+                    label="Descargar Excel",
                     data=excel_bytes,
-                    file_name=f"Reporte_{categoria}_{APP_VERSION}.xlsx",
+                    file_name=f"Reporte_{categoria}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             else:
-                st.error("No se encontraron códigos EAN válidos en el PDF.")
+                st.error("No se encontraron registros válidos en el PDF.")
 
+# --- PIE DE PÁGINA SIMPLE ---
 st.markdown("---")
-st.caption(
-    f"🟢 **Estado:** Ultrarrápido | **Versión:** `{APP_VERSION}` | Motor Python Nativo (Coordenadas Y)"
-)
+st.write("Desarrollado por **Alfredo HM**")
