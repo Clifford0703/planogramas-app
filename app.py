@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("📊 Convertidor de Planogramas a Excel")
 st.write(
     "Sube tu archivo PDF de implementación para extraer las tablas de productos "
-    "de forma clara, completa y perfectamente estructurada en Excel."
+    "con detección dinámica de columnas para una alineación 100% exacta."
 )
 
 st.sidebar.title("📌 Información")
@@ -24,26 +24,26 @@ st.sidebar.write("**Autor:** Alfredo HM")
 st.sidebar.write("**Estado:** Listo para procesar")
 
 
-# --- ALGORITMO DE EXTRACCIÓN POR BLOQUES DE ITEM Y COORDENADAS X ---
-def extraer_tabla_perfecta(pdf_file):
+# --- ALGORITMO DINÁMICO DE CORTE POR Detección DE CABECERAS ---
+def extraer_tabla_dinamica(pdf_file):
     datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
 
     with pdfplumber.open(pdf_file) as pdf:
         for pagina in pdf.pages:
             words = pagina.extract_words(
-                x_tolerance=2, y_tolerance=2, keep_blank_chars=False
+                x_tolerance=3, y_tolerance=3, keep_blank_chars=False
             )
             if not words:
                 continue
 
-            # 1. Agrupar palabras por altura vertical (Y)
+            # 1. Agrupar palabras por renglón vertical (coordenada Y)
             lineas_dict = {}
             for w in words:
                 y_pos = round(w["top"], 1)
                 linea_clave = None
                 for y_existente in lineas_dict.keys():
-                    if abs(y_existente - y_pos) <= 3.0:
+                    if abs(y_existente - y_pos) <= 3.5:
                         linea_clave = y_existente
                         break
 
@@ -53,11 +53,104 @@ def extraer_tabla_perfecta(pdf_file):
 
                 lineas_dict[linea_clave].append(w)
 
-            # 2. Encontrar cada ítem (fila principal donde inicia un EAN)
-            bloques_items = []
-            y_keys_ordenadas = sorted(lineas_dict.keys())
+            # 2. Localizar dinámicamente los bordes X de cada columna desde el Encabezado
+            # Búsqueda de las palabras clave del encabezado
+            x_cols = {
+                "bandeja": 0,
+                "num": 0,
+                "ean": 0,
+                "nombre": 0,
+                "marca": 0,
+                "desc": 0,
+                "fab": 0,
+                "caras": 0,
+                "alt": 0,
+                "prof": 0,
+                "unid_band": 0,
+                "tot_unid": 0,
+            }
 
-            for idx, y_pos in enumerate(y_keys_ordenadas):
+            for y_k, w_list in lineas_dict.items():
+                for w in w_list:
+                    txt = w["text"].lower().strip()
+                    if txt == "bandeja":
+                        x_cols["bandeja"] = w["x0"]
+                    elif txt in ["n°", "n°.", "no", "n"]:
+                        x_cols["num"] = w["x0"]
+                    elif txt == "ean":
+                        x_cols["ean"] = w["x0"]
+                    elif txt == "nombre":
+                        x_cols["nombre"] = w["x0"]
+                    elif txt == "marca":
+                        x_cols["marca"] = w["x0"]
+                    elif "desc" in txt:
+                        x_cols["desc"] = w["x0"]
+                    elif "fabri" in txt or "fabricante" in txt:
+                        x_cols["fab"] = w["x0"]
+                    elif txt == "caras":
+                        x_cols["caras"] = w["x0"]
+                    elif txt == "altura":
+                        x_cols["alt"] = w["x0"]
+                    elif "profu" in txt or "profundidad" in txt:
+                        x_cols["prof"] = w["x0"]
+                    elif "unid" in txt and x_cols["unid_band"] == 0:
+                        x_cols["unid_band"] = w["x0"]
+
+            # Si no se detectaron cabeceras, usamos valores fallback calibrados
+            ancho_pag = pagina.width
+            if x_cols["nombre"] == 0:
+                x_cols["bandeja"] = 0.0 * ancho_pag
+                x_cols["num"] = 0.07 * ancho_pag
+                x_cols["ean"] = 0.11 * ancho_pag
+                x_cols["nombre"] = 0.22 * ancho_pag
+                x_cols["marca"] = 0.44 * ancho_pag
+                x_cols["desc"] = 0.55 * ancho_pag
+                x_cols["fab"] = 0.66 * ancho_pag
+                x_cols["caras"] = 0.81 * ancho_pag
+                x_cols["alt"] = 0.86 * ancho_pag
+                x_cols["prof"] = 0.90 * ancho_pag
+                x_cols["unid_band"] = 0.94 * ancho_pag
+
+            # Puntos medios de corte para separar celdas de forma óptima
+            cortes = [
+                (x_cols["bandeja"] + x_cols["num"]) / 2
+                if x_cols["num"] > 0
+                else 45,
+                (x_cols["num"] + x_cols["ean"]) / 2
+                if x_cols["ean"] > 0
+                else 75,
+                (x_cols["ean"] + x_cols["nombre"]) / 2
+                if x_cols["nombre"] > 0
+                else 140,
+                (x_cols["nombre"] + x_cols["marca"]) / 2
+                if x_cols["marca"] > 0
+                else 280,
+                (x_cols["marca"] + x_cols["desc"]) / 2
+                if x_cols["desc"] > 0
+                else 360,
+                (x_cols["desc"] + x_cols["fab"]) / 2
+                if x_cols["fab"] > 0
+                else 420,
+                (x_cols["fab"] + x_cols["caras"]) / 2
+                if x_cols["caras"] > 0
+                else 510,
+                (x_cols["caras"] + x_cols["alt"]) / 2
+                if x_cols["alt"] > 0
+                else 545,
+                (x_cols["alt"] + x_cols["prof"]) / 2
+                if x_cols["prof"] > 0
+                else 575,
+                (x_cols["prof"] + x_cols["unid_band"]) / 2
+                if x_cols["unid_band"] > 0
+                else 620,
+                x_cols["unid_band"] + 35,
+            ]
+
+            # 3. Encontrar filas con EAN
+            filas_ean = []
+            y_keys = sorted(lineas_dict.keys())
+
+            for y_pos in y_keys:
                 words_linea = sorted(
                     lineas_dict[y_pos], key=lambda item: item["x0"]
                 )
@@ -65,114 +158,85 @@ def extraer_tabla_perfecta(pdf_file):
 
                 match_ean = patron_ean.search(texto_linea)
                 if match_ean:
-                    bloques_items.append((y_pos, match_ean.group(0)))
+                    filas_ean.append((y_pos, match_ean.group(0)))
 
-            if not bloques_items:
+            if not filas_ean:
                 continue
 
-            ancho_pag = pagina.width
-
-            # 3. Procesar cada ítem agrupando todas sus sublíneas verticales
-            for i, (y_inicio, ean_val) in enumerate(bloques_items):
+            # 4. Asignar palabras estrictamente según los límites calculados
+            for i, (y_ini, ean_val) in enumerate(filas_ean):
                 y_fin = (
-                    bloques_items[i + 1][0]
-                    if i + 1 < len(bloques_items)
-                    else y_inicio + 50.0
+                    filas_ean[i + 1][0]
+                    if i + 1 < len(filas_ean)
+                    else y_ini + 45.0
                 )
 
-                # Extraer todas las palabras dentro del rango vertical de este producto
                 words_item = [
                     w
-                    for y_k in y_keys_ordenadas
-                    if y_inicio <= y_k < y_fin
+                    for y_k in y_keys
+                    if y_ini <= y_k < y_fin
                     for w in lineas_dict[y_k]
                 ]
-
-                # Clasificar palabras en las 12 columnas según su coordenada horizontal X
-                # (Límites calibrados según la maquetación estándar del reporte)
-                col_bandeja = []
-                col_num = []
-                col_ean = []
-                col_nombre = []
-                col_marca = []
-                col_desc = []
-                col_fab = []
-                col_caras = []
-                col_altura = []
-                col_prof = []
-                col_unid_band = []
-                col_total_unid = []
-
-                # Ordenar palabras de arriba a abajo y de izquierda a derecha
                 words_item = sorted(
                     words_item, key=lambda w: (round(w["top"], 1), w["x0"])
                 )
 
+                col_words = [[] for _ in range(12)]
+
                 for w in words_item:
-                    x_rel = w["x0"] / ancho_pag
-                    text = w["text"]
+                    x = w["x0"]
+                    txt = w["text"]
 
-                    if x_rel < 0.07:
-                        col_bandeja.append(text)
-                    elif x_rel < 0.11:
-                        if text.isdigit():
-                            col_num.append(text)
-                        else:
-                            col_bandeja.append(text)
-                    elif x_rel < 0.22:
-                        if patron_ean.match(text) or text.isdigit():
-                            col_ean.append(text)
-                    elif x_rel < 0.35:
-                        col_nombre.append(text)
-                    elif x_rel < 0.45:
-                        col_marca.append(text)
-                    elif x_rel < 0.56:
-                        col_desc.append(text)
-                    elif x_rel < 0.70:
-                        col_fab.append(text)
-                    elif x_rel < 0.74:
-                        col_caras.append(text)
-                    elif x_rel < 0.79:
-                        col_altura.append(text)
-                    elif x_rel < 0.85:
-                        col_prof.append(text)
-                    elif x_rel < 0.92:
-                        col_unid_band.append(text)
+                    if x < cortes[0]:
+                        col_words[0].append(txt)
+                    elif x < cortes[1]:
+                        col_words[1].append(txt)
+                    elif x < cortes[2]:
+                        col_words[2].append(txt)
+                    elif x < cortes[3]:
+                        col_words[3].append(txt)
+                    elif x < cortes[4]:
+                        col_words[4].append(txt)
+                    elif x < cortes[5]:
+                        col_words[5].append(txt)
+                    elif x < cortes[6]:
+                        col_words[6].append(txt)
+                    elif x < cortes[7]:
+                        col_words[7].append(txt)
+                    elif x < cortes[8]:
+                        col_words[8].append(txt)
+                    elif x < cortes[9]:
+                        col_words[9].append(txt)
+                    elif x < cortes[10]:
+                        col_words[10].append(txt)
                     else:
-                        col_total_unid.append(text)
+                        col_words[11].append(txt)
 
-                # Armar la fila final con los textos consolidados con espacios limpios
                 row = [""] * 12
-                row[0] = col_bandeja[0] if col_bandeja else ""
-                row[1] = col_num[0] if col_num else ""
-                row[2] = col_ean[0] if col_ean else ean_val
-                row[3] = " ".join(col_nombre).strip()
-                row[4] = " ".join(col_marca).strip()
-                row[5] = " ".join(col_desc).strip()
-                row[6] = " ".join(col_fab).strip()
-
-                # Limpieza de valores numéricos finales
-                row[7] = col_caras[0] if col_caras else "0"
-                row[8] = col_altura[0] if col_altura else "0"
-                row[9] = col_prof[0] if col_prof else "0"
-                row[10] = col_unid_band[0] if col_unid_band else "0"
-                row[11] = (
-                    col_total_unid[0]
-                    if col_total_unid
-                    else (col_unid_band[0] if col_unid_band else "0")
+                row[0] = col_words[0][0] if col_words[0] else ""
+                row[1] = col_words[1][0] if col_words[1] else ""
+                row[2] = (
+                    col_words[2][0]
+                    if (col_words[2] and patron_ean.match(col_words[2][0]))
+                    else ean_val
                 )
+                row[3] = " ".join(col_words[3]).strip()
+                row[4] = " ".join(col_words[4]).strip()
+                row[5] = " ".join(col_words[5]).strip()
+                row[6] = " ".join(col_words[6]).strip()
 
-                # Ajustes de separación si alguna palabra rozó el límite entre Nombre y Marca
-                # (Ejemplo: arreglar si 'MOUNTAIN' o 'ALTOMAYO' se coló al final del Nombre)
-                if row[4] and row[3].endswith(row[4]):
-                    row[3] = row[3][: -len(row[4])].strip()
+                row[7] = col_words[7][0] if col_words[7] else "0"
+                row[8] = col_words[8][0] if col_words[8] else "0"
+                row[9] = col_words[9][0] if col_words[9] else "0"
+                row[10] = col_words[10][0] if col_words[10] else "0"
+                row[11] = col_words[11][0] if col_words[11] else row[10]
 
                 datos_procesados.append(row)
 
     return datos_procesados
 
 
-# --- FUNCIÓN PARA GENERAR EL EXCEL CON ESTILOS IDÉNTICOS AL MODELO ---
+# --- GENERACIÓN DE EXCEL ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -263,16 +327,16 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN formato texto estricto
+            elif c_idx == 3:
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
-            elif c_idx in [4, 5, 6, 7]:  # Nombre, Marca, Desc_A, Fabricante
+            elif c_idx in [4, 5, 6, 7]:
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:  # Valores Numéricos
+            elif c_idx in [8, 9, 10, 11]:
                 cell.value = int(val) if str(val).isdigit() else 0
                 cell.alignment, cell.number_format = align_right, "#,##0"
-            elif c_idx == 12:  # Total_Unidades
+            elif c_idx == 12:
                 if str(val) == "*":
                     cell.value, cell.alignment = "*", align_center
                 else:
@@ -305,7 +369,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # --- PESTAÑA RESUMEN Y KPIS ---
+    # RESUMEN Y KPIS
     ws_summary.cell(
         row=1,
         column=1,
@@ -460,11 +524,11 @@ if uploaded_file is not None:
 
     if st.button("Procesar y Convertir a Excel"):
         with st.spinner("Procesando documento..."):
-            datos = extraer_tabla_perfecta(uploaded_file)
+            datos = extraer_tabla_dinamica(uploaded_file)
 
             if datos:
                 st.success(
-                    f"¡Listo! Se extrajeron {len(datos)} filas con todas sus columnas estructuradas."
+                    f"¡Listo! Se extrajeron {len(datos)} filas con alineación perfecta por columna."
                 )
 
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
