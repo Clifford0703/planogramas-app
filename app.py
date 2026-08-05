@@ -18,13 +18,13 @@ st.set_page_config(
 
 st.title("⚡ Convertidor de Planogramas con Visión AI (Groq)")
 st.write(
-    "Utiliza **Groq Cloud (Llama 3.2 Vision)** para procesar visualmente "
+    "Utiliza **Groq Cloud Vision** para procesar visualmente "
     "cada página del PDF de forma ultra rápida y sin omitir ninguna columna."
 )
 
 st.sidebar.title("📌 Información")
 st.sidebar.write("**Autor:** Alfredo HM")
-st.sidebar.write("**Motor:** Groq Llama 3.2 Vision")
+st.sidebar.write("**Motor:** Groq (Qwen Vision)")
 
 # --- CONFIGURACIÓN DE GROQ API ---
 groq_api_key = st.secrets.get(
@@ -75,9 +75,9 @@ def extraer_tablas_con_groq(pdf_bytes):
         base64_image = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
 
         try:
-            # Llamada síncrona a Groq Vision (Ultra Rápida)
+            # Llamada a Groq Vision usando el modelo activo qwen/qwen3.6-27b
             response = client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview",
+                model="qwen/qwen3.6-27b",
                 response_format={"type": "json_object"},
                 messages=[
                     {
