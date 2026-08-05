@@ -1,3 +1,4 @@
 streamlit
-pdfplumber
+groq
+pypdfium2
 openpyxl
