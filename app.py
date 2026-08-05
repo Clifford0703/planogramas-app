@@ -1,162 +1,113 @@
+import base64
 import io
-import re
+import json
+import os
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-import pdfplumber
+import pypdfium2 as pdfium
 import streamlit as st
+from groq import Groq
 
 # --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
 st.set_page_config(
     page_title="Convertidor de Planogramas a Excel",
-    page_icon="📊",
+    page_icon="⚡",
     layout="centered",
 )
 
-st.title("📊 Convertidor de Planogramas a Excel")
+st.title("⚡ Convertidor de Planogramas con Visión AI (Groq)")
 st.write(
-    "Sube tu archivo PDF de implementación para extraer las tablas de productos "
-    "de forma clara, completa y perfectamente estructurada en Excel."
+    "Utiliza **Groq Cloud (Llama 3.2 Vision)** para procesar visualmente "
+    "cada página del PDF de forma ultra rápida y sin omitir ninguna columna."
 )
 
 st.sidebar.title("📌 Información")
 st.sidebar.write("**Autor:** Alfredo HM")
-st.sidebar.write("**Estado:** Listo para procesar")
+st.sidebar.write("**Motor:** Groq Llama 3.2 Vision")
+
+# --- CONFIGURACIÓN DE GROQ API ---
+groq_api_key = st.secrets.get(
+    "GROQ_API_KEY", os.environ.get("GROQ_API_KEY", "")
+)
+
+if not groq_api_key:
+    groq_api_key = st.text_input("Ingresa tu GROQ_API_KEY:", type="password")
+
+client = None
+if groq_api_key:
+    client = Groq(api_key=groq_api_key)
 
 
-# --- ALGORITMO CORREGIDO DE EXTRACCIÓN POR LÍNEAS Y COORDENADAS ---
-def extraer_tabla_robusta_pdf(pdf_file):
-    datos_procesados = []
-    patron_ean = re.compile(r"\b\d{10,14}\b")
+# --- FUNCIÓN DE EXTRACCIÓN CON GROQ VISION ---
+def extraer_tablas_con_groq(pdf_bytes):
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    todas_las_filas = []
 
-    with pdfplumber.open(pdf_file) as pdf:
-        for pagina in pdf.pages:
-            words = pagina.extract_words(
-                x_tolerance=3, y_tolerance=3, keep_blank_chars=False
+    prompt = """
+    Analiza esta página de planograma/reporte de implementación de retail.
+    Extrae ÚNICAMENTE la tabla de productos detallada.
+    Ignora encabezados generales, títulos de módulos, gráficos de pie/barras e imágenes del mueble.
+    
+    Devuelve un JSON estrictamente con la siguiente estructura (una lista de listas de cadenas de texto):
+    {
+        "filas": [
+            ["Bandeja", "N°", "EAN", "Nombre", "Marca", "Desc_A", "Fabricante", "Caras", "Altura", "Profundidad", "Total Unid en Bandeja", "Total_Unidades"],
+            ...
+        ]
+    }
+    Instrucciones estrictas:
+    1. Asegúrate de capturar TODAS las líneas que contengan un código EAN (numérico de 10-14 dígitos).
+    2. Mantén exactamente las 12 columnas.
+    3. Si una celda tiene un asterisco '*', consérvalo.
+    """
+
+    total_paginas = len(pdf)
+    barra_progreso = st.progress(0)
+
+    for i, page in enumerate(pdf):
+        st.write(f"⚡ Escaneando página {i+1} de {total_paginas} con Groq...")
+
+        # Renderizar página a imagen PNG en memoria y convertir a base64
+        image = page.render(scale=2).to_pil()
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format="PNG")
+        base64_image = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
+
+        try:
+            # Llamada síncrona a Groq Vision (Ultra Rápida)
+            response = client.chat.completions.create(
+                model="llama-3.2-11b-vision-preview",
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    }
+                ],
             )
-            if not words:
-                continue
 
-            # 1. Agrupar palabras por renglón horizontal (coordenada Y)
-            lineas_dict = {}
-            for w in words:
-                y_pos = round(w["top"], 1)
-                linea_clave = None
-                for y_existente in lineas_dict.keys():
-                    if abs(y_existente - y_pos) <= 3.5:
-                        linea_clave = y_existente
-                        break
+            res_json = json.loads(response.choices[0].message.content)
+            filas_pag = res_json.get("filas", [])
 
-                if linea_clave is None:
-                    linea_clave = y_pos
-                    lineas_dict[linea_clave] = []
+            for f in filas_pag:
+                if f and f[0] not in ["Bandeja", "Reporte de Implementación"]:
+                    todas_las_filas.append(f)
 
-                lineas_dict[linea_clave].append(w)
+        except Exception as e:
+            st.error(f"Error en página {i+1}: {e}")
 
-            # 2. Identificar filas con EAN válido
-            filas_con_ean = []
-            for y_pos in sorted(lineas_dict.keys()):
-                words_linea = sorted(
-                    lineas_dict[y_pos], key=lambda item: item["x0"]
-                )
-                texto_linea = " ".join([w["text"] for w in words_linea])
+        barra_progreso.progress((i + 1) / total_paginas)
 
-                match_ean = patron_ean.search(texto_linea)
-                if match_ean:
-                    filas_con_ean.append(
-                        (y_pos, words_linea, match_ean.group(0))
-                    )
-
-            if not filas_con_ean:
-                continue
-
-            width = pagina.width
-
-            # 3. Asignar palabras respetando el orden horizontal estricto
-            for i, (y_pos, words_linea, ean_val) in enumerate(filas_con_ean):
-                col = [""] * 12
-
-                txt_nombre = []
-                txt_marca = []
-                txt_desc = []
-                txt_fabricante = []
-
-                # Bloque de la fila actual (incluye multilíneas)
-                y_siguiente = (
-                    filas_con_ean[i + 1][0]
-                    if i + 1 < len(filas_con_ean)
-                    else y_pos + 45.0
-                )
-
-                words_bloque = [
-                    w
-                    for y_k in lineas_dict.keys()
-                    if y_pos <= y_k < y_siguiente
-                    for w in lineas_dict[y_k]
-                ]
-                # Ordenar por Y primero (línea por línea) y luego por X (izquierda a derecha)
-                words_bloque = sorted(
-                    words_bloque, key=lambda w: (round(w["top"], 1), w["x0"])
-                )
-
-                for w in words_bloque:
-                    x_rel = w["x0"] / width
-                    text = w["text"]
-
-                    # Rangos horizontales calibrados
-                    if x_rel < 0.075:
-                        if not col[0]:
-                            col[0] = text
-                    elif x_rel < 0.11:
-                        if text.isdigit() and not col[1]:
-                            col[1] = text
-                        elif not col[0]:
-                            col[0] = text
-                    elif x_rel < 0.21:
-                        if patron_ean.match(text):
-                            col[2] = text
-                        elif not col[2] and text.isdigit():
-                            col[2] = text
-                    elif x_rel < 0.38:
-                        # Columna Nombre (Ampliada para no cortar el título del producto)
-                        txt_nombre.append(text)
-                    elif x_rel < 0.46:
-                        # Columna Marca
-                        txt_marca.append(text)
-                    elif x_rel < 0.56:
-                        # Columna Desc_A
-                        txt_desc.append(text)
-                    elif x_rel < 0.70:
-                        # Columna Fabricante
-                        txt_fabricante.append(text)
-                    elif x_rel < 0.74:
-                        if not col[7] and (text.isdigit() or text == "*"):
-                            col[7] = text
-                    elif x_rel < 0.80:
-                        if not col[8] and (text.isdigit() or text == "*"):
-                            col[8] = text
-                    elif x_rel < 0.86:
-                        if not col[9] and (text.isdigit() or text == "*"):
-                            col[9] = text
-                    elif x_rel < 0.93:
-                        if not col[10] and (text.isdigit() or text == "*"):
-                            col[10] = text
-                    else:
-                        if not col[11] and (text.isdigit() or text == "*"):
-                            col[11] = text
-
-                # Consolidación de textos
-                col[3] = " ".join(txt_nombre).strip()
-                col[4] = " ".join(txt_marca).strip()
-                col[5] = " ".join(txt_desc).strip()
-                col[6] = " ".join(txt_fabricante).strip()
-
-                if not col[2]:
-                    col[2] = ean_val
-
-                datos_procesados.append(col)
-
-    return datos_procesados
+    return todas_las_filas
 
 
 # --- FUNCIÓN DE GENERACIÓN DE EXCEL ---
@@ -292,7 +243,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # PESTAÑA KPIS Y RESUMEN
+    # PESTAÑA RESUMEN
     ws_summary.cell(
         row=1,
         column=1,
@@ -439,31 +390,36 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     return output
 
 
-# --- INTERFAZ STREAMLIT ---
+# --- INTERFAZ USUARIO ---
 uploaded_file = st.file_uploader("Arrastra tu PDF aquí", type=["pdf"])
 
 if uploaded_file is not None:
     categoria = st.text_input("Nombre de la Categoría (opcional)", "General")
 
     if st.button("Procesar y Convertir a Excel"):
-        with st.spinner("Procesando documento..."):
-            datos = extraer_tabla_robusta_pdf(uploaded_file)
+        if not client:
+            st.error(
+                "Configura tu GROQ_API_KEY en los Secrets de Streamlit para continuar."
+            )
+        else:
+            with st.spinner("Escaneando imágenes con la IA de Groq..."):
+                pdf_bytes = uploaded_file.read()
+                datos = extraer_tablas_con_groq(pdf_bytes)
 
-            if datos:
-                st.success(
-                    f"¡Listo! Se extrajeron {len(datos)} filas con todas sus columnas completas."
-                )
+                if datos:
+                    st.success(
+                        f"¡Éxito! Se procesaron {len(datos)} registros de forma impecable."
+                    )
+                    excel_bytes = generar_excel_en_memoria(datos, categoria)
 
-                excel_bytes = generar_excel_en_memoria(datos, categoria)
-
-                st.download_button(
-                    label="Descargar Excel",
-                    data=excel_bytes,
-                    file_name=f"Reporte_{categoria}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            else:
-                st.error("No se encontraron registros válidos en el PDF.")
+                    st.download_button(
+                        label="Descargar Excel",
+                        data=excel_bytes,
+                        file_name=f"Reporte_{categoria}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                else:
+                    st.error("No se pudieron extraer los datos.")
 
 st.markdown("---")
 st.write("Desarrollado por **Alfredo HM**")
