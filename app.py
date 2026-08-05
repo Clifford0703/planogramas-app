@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("📊 Convertidor de Planogramas a Excel")
 st.write(
     "Sube tu archivo PDF de implementación para estructurar las celdas "
-    "mediante delimitación geométrica exacta de Encabezados y Bandejas."
+    "con delimitación geométrica exacta y captura precisa de columnas numéricas."
 )
 
 st.sidebar.title("📌 Información")
@@ -24,7 +24,7 @@ st.sidebar.write("**Autor:** Alfredo HM")
 st.sidebar.write("**Estado:** Listo para procesar")
 
 
-# --- ALGORITMO STRICTO: ENCABEZADOS DE COLUMNA Y BLOQUES DE BANDEJA ---
+# --- ALGORITMO STRICTO CON CAPTURA EXACTA DE NUMÉRICOS ---
 def extraer_tabla_geometria_estricta(pdf_file):
     datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
@@ -37,18 +37,16 @@ def extraer_tabla_geometria_estricta(pdf_file):
             if not words:
                 continue
 
-            # 1. IDENTIFICAR COORDENADAS X_0 DE LOS 12 ENCABEZADOS
-            # Agrupar palabras de la cabecera (parte superior de la página)
-            cabecera_words = [w for w in words if w["top"] < 180]
+            # 1. IDENTIFICAR COORDENADAS X_0 DE LOS 12 ENCABEZADOS (Soporte multilínea)
+            cabecera_words = [w for w in words if w["top"] < 240]
 
-            # Buscar la posición X0 de cada uno de los 12 encabezados principales
             encabezados_x = {}
 
             for w in cabecera_words:
                 txt = w["text"].lower().strip()
                 x0 = w["x0"]
 
-                if "bandeja" in txt and "bandeja" not in encabezados_x:
+                if "bandeja" in txt and x0 < 50 and "bandeja" not in encabezados_x:
                     encabezados_x["bandeja"] = x0
                 elif txt in ["n°", "n°.", "no", "n"] and "num" not in encabezados_x:
                     encabezados_x["num"] = x0
@@ -62,18 +60,17 @@ def extraer_tabla_geometria_estricta(pdf_file):
                     encabezados_x["desc"] = x0
                 elif ("fabri" in txt or "fabricante" in txt) and "fab" not in encabezados_x:
                     encabezados_x["fab"] = x0
-                elif txt == "caras" and "caras" not in encabezados_x:
+                elif "cara" in txt and "caras" not in encabezados_x:
                     encabezados_x["caras"] = x0
-                elif txt == "altura" and "alt" not in encabezados_x:
+                elif "altu" in txt and "alt" not in encabezados_x:
                     encabezados_x["alt"] = x0
                 elif "prof" in txt and "prof" not in encabezados_x:
                     encabezados_x["prof"] = x0
                 elif "unid" in txt and "unid_band" not in encabezados_x and x0 > 550:
                     encabezados_x["unid_band"] = x0
-                elif ("total_" in txt or "unidades" in txt) and "tot_unid" not in encabezados_x and x0 > 650:
+                elif ("tot" in txt or "unidad" in txt) and "tot_unid" not in encabezados_x and x0 > 650:
                     encabezados_x["tot_unid"] = x0
 
-            # Si alguna cabecera no se detectó por escaneo, usar límites por defecto proporcionales
             width = pagina.width
             list_x = [
                 encabezados_x.get("bandeja", 11.5),
@@ -88,22 +85,20 @@ def extraer_tabla_geometria_estricta(pdf_file):
                 encabezados_x.get("prof", 597.1),
                 encabezados_x.get("unid_band", 642.2),
                 encabezados_x.get("tot_unid", 700.8),
-                width,  # Límite derecho de la página
+                width,
             ]
 
-            # Asegurar que las coordenadas X estén estrictamente ordenadas de izquierda a derecha
+            # Ordenar coordenadas estrictamente de izquierda a derecha
             list_x = sorted(list_x)
 
-            # 2. DEFINIR RANGOS X DE CADA UNA DE LAS 12 COLUMNAS (X_inicio a X_siguiente)
-            # Columna i abarca desde list_x[i] hasta list_x[i+1]
+            # 2. DEFINIR RANGOS X DE CADA COLUMNA
             limites_columnas = []
             for col_idx in range(12):
-                x_start = list_x[col_idx] - 2.0  # Margen de tolerancia a la izquierda
-                x_end = list_x[col_idx + 1] - 2.0  # El límite es el inicio de la siguiente columna
+                x_start = list_x[col_idx] - 2.0
+                x_end = list_x[col_idx + 1] - 2.0
                 limites_columnas.append((x_start, x_end))
 
-            # 3. IDENTIFICAR INICIO DE CADA FILA POR BANDEJA / ÍTEM (LÍMITES EN Y)
-            # Agrupar palabras por altura Y (renglón)
+            # 3. IDENTIFICAR FILAS POR BANDEJA / EAN
             lineas_dict = {}
             for w in words:
                 y_pos = round(w["top"], 1)
@@ -119,7 +114,6 @@ def extraer_tabla_geometria_estricta(pdf_file):
 
                 lineas_dict[linea_clave].append(w)
 
-            # Buscar renglones donde inicia un producto (presencia de código EAN)
             filas_inicio = []
             y_ordenadas = sorted(lineas_dict.keys())
 
@@ -132,16 +126,14 @@ def extraer_tabla_geometria_estricta(pdf_file):
             if not filas_inicio:
                 continue
 
-            # 4. CAPTURAR Y CONCATENAR EL CONTENIDO MULTILÍNEA DE CADA CELDA
+            # 4. EXTRACCIÓN Y LIMPIEZA POR CELDA
             for i, (y_inicio, ean_codigo) in enumerate(filas_inicio):
-                # La altura del ítem va desde su Y_inicio hasta el Y_inicio del siguiente ítem
                 y_fin = (
                     filas_inicio[i + 1][0]
                     if i + 1 < len(filas_inicio)
                     else y_inicio + 50.0
                 )
 
-                # Seleccionar todas las palabras dentro del bloque vertical del ítem
                 words_item = [
                     w
                     for y_k in y_ordenadas
@@ -154,7 +146,6 @@ def extraer_tabla_geometria_estricta(pdf_file):
                 for c_idx in range(12):
                     x_start, x_end = limites_columnas[c_idx]
 
-                    # Palabras pertenecientes a esta celda específica (por coordenadas X)
                     words_celda = [
                         w for w in words_item if x_start <= w["x0"] < x_end
                     ]
@@ -163,7 +154,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
                         row_12_cols[c_idx] = ""
                         continue
 
-                    # Agrupar palabras de la celda por sus renglones (saltos de línea interiores)
+                    # Agrupar renglones dentro de la celda
                     renglones_celda = {}
                     for w in words_celda:
                         y_r = round(w["top"], 1)
@@ -177,7 +168,6 @@ def extraer_tabla_geometria_estricta(pdf_file):
                             renglones_celda[r_clave] = []
                         renglones_celda[r_clave].append(w)
 
-                    # Leer renglón por renglón de arriba a abajo y concatenar
                     lineas_texto = []
                     for y_r in sorted(renglones_celda.keys()):
                         palabras_r = sorted(
@@ -187,10 +177,16 @@ def extraer_tabla_geometria_estricta(pdf_file):
                         if texto_r.strip():
                             lineas_texto.append(texto_r.strip())
 
-                    # Unir las líneas de la celda con espacio limpio
-                    row_12_cols[c_idx] = " ".join(lineas_texto).strip()
+                    val_raw = " ".join(lineas_texto).strip()
 
-                # Asegurar que la columna EAN contenga el código extraído
+                    # REGLA ESPECIAL PARA COLUMNAS NUMÉRICAS (7 a 11 -> Caras, Altura, Prof, Total Unid, Total Unidades)
+                    if c_idx >= 7:
+                        # Extraer solo dígitos o asterisco
+                        nums = re.findall(r"\d+|\*", val_raw)
+                        row_12_cols[c_idx] = nums[0] if nums else "0"
+                    else:
+                        row_12_cols[c_idx] = val_raw
+
                 if not row_12_cols[2] or not patron_ean.match(row_12_cols[2]):
                     row_12_cols[2] = ean_codigo
 
@@ -199,7 +195,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
     return datos_procesados
 
 
-# --- FUNCIÓN DE GENERACIÓN DE EXCEL CON ESTILOS Y KPIS ---
+# --- GENERACIÓN DE EXCEL Y KPIS ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -290,20 +286,20 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN en texto
+            elif c_idx == 3:  # EAN texto
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
             elif c_idx in [4, 5, 6, 7]:  # Textos
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:  # Números
+            elif c_idx in [8, 9, 10, 11]:  # Números enteros
                 cell.value = int(val) if str(val).isdigit() else 0
                 cell.alignment, cell.number_format = align_right, "#,##0"
-            elif c_idx == 12:  # Total_Unidades
+            elif c_idx == 12:  # Total_Unidades (soporta '*')
                 if str(val) == "*":
                     cell.value, cell.alignment = "*", align_center
                 else:
-                    cell.value = int(val) if str(val).isdigit() else val
+                    cell.value = int(val) if str(val).isdigit() else 0
                     cell.alignment, cell.number_format = align_right, "#,##0"
 
     tot_row = len(datos_filas) + start_row + 1
@@ -491,7 +487,7 @@ if uploaded_file is not None:
 
             if datos:
                 st.success(
-                    f"¡Listo! Se extrajeron {len(datos)} filas con estructura perfecta."
+                    f"¡Listo! Se extrajeron {len(datos)} filas con valores numéricos y texto en formato correcto."
                 )
 
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
