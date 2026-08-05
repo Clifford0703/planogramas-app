@@ -8,23 +8,24 @@ import streamlit as st
 
 # --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
 st.set_page_config(
-    page_title="Convertidor de Planogramas a Excel",
-    page_icon="📊",
+    page_title="PDF Table Extractor",
+    page_icon="✨",
     layout="wide",
 )
 
-st.title("📊 Convertidor de Planogramas a Excel")
-st.write(
-    "Sube tu archivo PDF de implementación para estructurar las celdas "
-    "garantizando la extracción completa de las 12 columnas (incluyendo las últimas 2 columnas de totales)."
-)
-
-st.sidebar.title("📌 Información")
-st.sidebar.write("**Autor:** Alfredo HM")
-st.sidebar.write("**Estado:** Listo para procesar")
+# --- PANEL LATERAL MINIMALISTA ---
+st.sidebar.markdown("### ⚙️ Ajustes")
+st.sidebar.markdown("---")
+st.sidebar.caption("Versión 2.4.0")
 
 
-# --- ALGORITMO STRICTO CON LECTURA COMPLETA DE ANCHO DE PÁGINA ---
+# --- INTERFAZ PRINCIPAL ---
+st.title("✨ PDF Table Extractor")
+st.markdown("Carga tu archivo PDF para exportar las tablas directamente a Excel.")
+st.markdown("---")
+
+
+# --- ALGORITMO STRICTO DE EXTRACCIÓN GEOMÉTRICA ---
 def extraer_tabla_geometria_estricta(pdf_file):
     datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
@@ -39,7 +40,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
 
             width = pagina.width
 
-            # 1. IDENTIFICAR COORDENADAS X_0 DE LOS ENCABEZADOS (Soporte multilínea)
+            # 1. IDENTIFICAR COORDENADAS X_0 DE LOS ENCABEZADOS
             cabecera_words = [w for w in words if w["top"] < 240]
             encabezados_x = {}
 
@@ -72,7 +73,6 @@ def extraer_tabla_geometria_estricta(pdf_file):
                 elif ("tot" in txt or "unidad" in txt) and "tot_unid" not in encabezados_x and x0 > (width * 0.85):
                     encabezados_x["tot_unid"] = x0
 
-            # Límites por defecto proporcionales al ancho total del documento
             list_x = [
                 encabezados_x.get("bandeja", 0.01 * width),
                 encabezados_x.get("num", 0.08 * width),
@@ -86,7 +86,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
                 encabezados_x.get("prof", 0.79 * width),
                 encabezados_x.get("unid_band", 0.86 * width),
                 encabezados_x.get("tot_unid", 0.94 * width),
-                width,  # Límite completo de la página
+                width,
             ]
 
             list_x = sorted(list_x)
@@ -126,7 +126,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
             if not filas_inicio:
                 continue
 
-            # 4. EXTRACCIÓN Y RETENCIÓN EXACTA DE LAS 12 COLUMNAS
+            # 4. EXTRACCIÓN POR CELDAS Y RETENCIÓN EXACTA DE VALORES
             for i, (y_inicio, ean_codigo) in enumerate(filas_inicio):
                 y_fin = (
                     filas_inicio[i + 1][0]
@@ -178,7 +178,6 @@ def extraer_tabla_geometria_estricta(pdf_file):
 
                     val_raw = " ".join(lineas_texto).strip()
 
-                    # REGISTRO DE ASTERISCOS Y VALORES NUMÉRICOS
                     if c_idx >= 7:
                         if "*" in val_raw:
                             row_12_cols[c_idx] = "*"
@@ -191,21 +190,18 @@ def extraer_tabla_geometria_estricta(pdf_file):
                 if not row_12_cols[2] or not patron_ean.match(row_12_cols[2]):
                     row_12_cols[2] = ean_codigo
 
-                # RESPALDO DE SEGURIDAD: Si la columna 11 (Total_Unidades) o 10 (Total Unid en Bandeja) quedaron vacías,
-                # escaneamos todos los bloques numéricos del extremo derecho de la fila
+                # RESPALDO DERECHO DE TOTALES
                 words_derecha = sorted(
                     [w for w in words_item if w["x0"] > (width * 0.65)],
                     key=lambda x: x["x0"]
                 )
                 
-                # Extraer todos los valores finales (números o asteriscos)
                 valores_derecha = []
                 for w in words_derecha:
                     txt = w["text"].strip()
                     if txt.isdigit() or txt == "*":
                         valores_derecha.append(txt)
 
-                # Si tenemos valores a la derecha, aseguramos las últimas columnas
                 if len(valores_derecha) >= 1 and not row_12_cols[11]:
                     row_12_cols[11] = valores_derecha[-1]
                 if len(valores_derecha) >= 2 and not row_12_cols[10]:
@@ -222,7 +218,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
     return datos_procesados
 
 
-# --- GENERACIÓN DE EXCEL Y KPIS ---
+# --- GENERACIÓN DE EXCEL CON FORMATO CORPORATIVO ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -313,13 +309,13 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN texto
+            elif c_idx == 3:  # EAN formato texto
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
-            elif c_idx in [4, 5, 6, 7]:  # Textos
+            elif c_idx in [4, 5, 6, 7]:  # Cadenas de Texto
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11, 12]:  # Columnas Numéricas o Asterisco
+            elif c_idx in [8, 9, 10, 11, 12]:  # Números o Asterisco
                 val_str = str(val).strip()
                 if val_str == "*":
                     cell.value = "*"
@@ -504,31 +500,41 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     return output
 
 
-# --- INTERFAZ STREAMLIT ---
-uploaded_file = st.file_uploader("Arrastra tu PDF aquí", type=["pdf"])
+# --- SECCIÓN DE CARGA Y PROCESAMIENTO ---
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    uploaded_file = st.file_uploader("Seleccionar archivo PDF", type=["pdf"])
+
+with col2:
+    categoria = st.text_input("Categoría", value="General")
 
 if uploaded_file is not None:
-    categoria = st.text_input("Nombre de la Categoría (opcional)", "General")
-
-    if st.button("Procesar y Convertir a Excel"):
-        with st.spinner("Procesando documento..."):
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🚀 Procesar y Convertir", use_container_width=True):
+        with st.spinner("Procesando..."):
             datos = extraer_tabla_geometria_estricta(uploaded_file)
 
             if datos:
-                st.success(
-                    f"¡Listo! Se extrajeron {len(datos)} filas con las 12 columnas y totales completos."
-                )
+                st.success(f"Se procesaron con éxito **{len(datos)} filas**.")
 
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
 
                 st.download_button(
-                    label="Descargar Excel",
+                    label="📥 Descargar Excel",
                     data=excel_bytes,
                     file_name=f"Reporte_{categoria}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
                 )
             else:
-                st.error("No se encontraron registros válidos en el PDF.")
+                st.error("No se encontraron registros en el PDF.")
 
-st.markdown("---")
-st.write("Desarrollado por **Alfredo HM**")
+# --- PIE DE PÁGINA DISCRETO ---
+st.markdown("<br><br><hr>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='text-align: center; color: #999999; font-size: 0.8rem;'>"
+    "Desarrollado por Alfredo HM"
+    "</div>",
+    unsafe_allow_html=True,
+)
