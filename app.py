@@ -1,9 +1,9 @@
 import io
+import re
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pdfplumber
-
 import streamlit as st
 
 # --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
@@ -15,33 +15,57 @@ st.set_page_config(
 
 st.title("📊 Procesador de Planogramas y Reportes (PDF ➔ Excel)")
 st.write(
-    "Sube tu archivo PDF de implementación para generar un Excel estructurado con **formatos, pestañas de KPIs y fórmulas automáticas**."
+    "Sube tu archivo PDF de implementación para generar un Excel estructurado "
+    "filtrando solo las tablas de productos con formatos, KPIs y fórmulas automáticas."
 )
 
 
-# --- FUNCIÓN 1: EXTRAER TABLAS DEL PDF ---
+# --- FUNCIÓN 1: EXTRAER ÚNICAMENTE LAS TABLAS REALES DEL PDF ---
 def extraer_tabla_desde_pdf_stream(pdf_file):
     filas_extraidas = []
+
+    # Patrón Regex: Valida si la celda empieza como número de bandeja (ej. 1.1, 2.3, 1-3, 30-1-9)
+    patron_bandeja = re.compile(r"^\d+([\.\-]\d+)*")
+
     with pdfplumber.open(pdf_file) as pdf:
         for pagina in pdf.pages:
             tablas = pagina.extract_tables()
             for tabla in tablas:
                 for fila in tabla:
+                    if not fila:
+                        continue
+
+                    # Limpiamos saltos de línea e espacios en blanco adicionales
                     fila_limpia = [
                         celda.replace("\n", " ").strip() if celda else ""
                         for celda in fila
                     ]
-                    # Filtramos encabezados repetidos
-                    if fila_limpia and fila_limpia[0] not in [
-                        "Bandeja",
-                        "Reporte de Implementación",
-                        "",
-                    ]:
+
+                    # 1. Ignorar filas vacías
+                    if not any(fila_limpia):
+                        continue
+
+                    primer_val = fila_limpia[0]
+
+                    # 2. FILTRO ANTI-RUIDO:
+                    # Validar si el primer valor es una bandeja real (ej. "1.1")
+                    es_bandeja_valida = bool(
+                        patron_bandeja.match(primer_val)
+                    ) and primer_val not in ["1-3", "2-3", "1", "2"]
+
+                    # Validar si alguna celda contiene un código EAN numérico real (10+ dígitos)
+                    tiene_ean_valido = any(
+                        len(c) >= 10 and c.isdigit() for c in fila_limpia
+                    )
+
+                    # Si NO cumple ninguna de las dos condiciones, se asume que es texto flotante/gráfico
+                    if es_bandeja_valida or tiene_ean_valido:
                         filas_extraidas.append(fila_limpia)
+
     return filas_extraidas
 
 
-# --- FUNCIÓN 2: CREAR EXCEL CON FORMATO Y KPIS ---
+# --- FUNCIÓN 2: GENERAR EXCEL CON DISEÑO Y KPIS ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -101,7 +125,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         "Total_Unidades",
     ]
 
-    # --- DATOS ---
+    # --- PESTAÑA 1: DATOS DETALLADOS ---
     ws_data.cell(row=1, column=1, value="METRO HIPER MEJORADO").font = font_title
     ws_data.cell(
         row=2,
@@ -122,6 +146,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     for r_idx, row_data in enumerate(datos_filas, start_row + 1):
         row_fill = fill_zebra if (r_idx % 2 == 0) else None
 
+        # Asegurar 12 columnas por fila
         while len(row_data) < 12:
             row_data.append("")
 
@@ -131,19 +156,19 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if row_fill:
                 cell.fill = row_fill
 
-            if c_idx in [1, 2]:
+            if c_idx in [1, 2]:  # Bandeja, N°
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN en texto
+            elif c_idx == 3:  # EAN (formato texto estricto para ceros a la izquierda)
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
-            elif c_idx in [4, 5, 6, 7]:
+            elif c_idx in [4, 5, 6, 7]:  # Nombre, Marca, Desc_A, Fabricante
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:
+            elif c_idx in [8, 9, 10, 11]:  # Caras, Altura, Profundidad, Total Bandeja
                 cell.value = int(val) if str(val).isdigit() else 0
                 cell.alignment, cell.number_format = align_right, "#,##0"
-            elif c_idx == 12:
+            elif c_idx == 12:  # Total_Unidades
                 if str(val) == "*":
                     cell.value, cell.alignment = "*", align_center
                 else:
@@ -172,11 +197,11 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         col_letter = get_column_letter(col[0].column)
         ws_data.column_dimensions[col_letter].width = 16
 
-    ws_data.column_dimensions["D"].width = 45
-    ws_data.column_dimensions["G"].width = 35
+    ws_data.column_dimensions["D"].width = 45  # Columna Nombre
+    ws_data.column_dimensions["G"].width = 35  # Columna Fabricante
     ws_data.freeze_panes = "A5"
 
-    # --- SUMMARY Y KPIS ---
+    # --- PESTAÑA 2: KPIS Y RESUMEN ---
     ws_summary.cell(
         row=1,
         column=1,
@@ -245,7 +270,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             "#,##0",
         )
 
-    # Resumen por Marca
+    # Tabla Resumen por Marca
     ws_summary.cell(row=8, column=2, value="Resumen por Marca").font = Font(
         name="Calibri", size=12, bold=True, color="1F497D"
     )
@@ -254,9 +279,10 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         c = ws_summary.cell(row=9, column=col_idx, value=h)
         c.font, c.fill, c.alignment = font_header, fill_header, align_center
 
+    # Extraer lista única de marcas reales
     marcas_set = list(
         dict.fromkeys(
-            [r[4] for r in datos_filas if len(r) > 4 and r[4] != ""]
+            [r[4] for r in datos_filas if len(r) > 4 and r[4].strip() != ""]
         )
     )
 
@@ -313,32 +339,31 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_summary.column_dimensions["D"].width = 22
     ws_summary.column_dimensions["E"].width = 16
 
-    # Guardar en buffer en memoria para descargar
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
     return output
 
 
-# --- INTERFAZ STREAMLIT ---
+# --- INTERFAZ GRAFICA STREAMLIT ---
 uploaded_file = st.file_uploader("Selecciona o arrastra tu PDF aquí", type=["pdf"])
 
 if uploaded_file is not None:
     categoria = st.text_input("Nombre de la Categoría", "General")
 
     if st.button("🚀 Procesar PDF y Generar Excel"):
-        with st.spinner("Leyendo tablas del PDF y aplicando estilos..."):
+        with st.spinner("Procesando y filtrando tablas del PDF..."):
             datos = extraer_tabla_desde_pdf_stream(uploaded_file)
 
             if datos:
                 st.success(
-                    f"¡Procesamiento completo! Se encontraron {len(datos)} registros."
+                    f"¡Extracción exitosa! Se procesaron {len(datos)} registros válidos."
                 )
 
-                # Generar el Excel
+                # Generar Excel en memoria
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
 
-                # Botón de descarga
+                # Botón de Descarga
                 st.download_button(
                     label="📥 Descargar Excel Formateado",
                     data=excel_bytes,
@@ -347,5 +372,5 @@ if uploaded_file is not None:
                 )
             else:
                 st.error(
-                    "No se pudieron extraer datos del PDF. Asegúrate de que contiene tablas."
+                    "No se encontraron filas con estructura de productos válidos en el PDF."
                 )
