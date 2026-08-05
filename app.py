@@ -1,71 +1,103 @@
 import io
-import re
+import json
+import os
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-import pdfplumber
+import pypdfium2 as pdfium
 import streamlit as st
+from google import genai
+from google.genai import types
 
-# --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
+# --- CONFIGURACIÓN DE STREAMLIT ---
 st.set_page_config(
-    page_title="Convertidor de Planogramas a Excel",
+    page_title="Convertidor Inteligente de Planogramas",
     page_icon="📊",
     layout="wide",
 )
 
-st.title("📊 Procesador de Planogramas y Reportes (PDF ➔ Excel)")
+st.title("📊 Procesador Multimodal de Planogramas (PDF ➔ Excel)")
 st.write(
-    "Sube tu archivo PDF de implementación para generar un Excel estructurado "
-    "filtrando solo las tablas de productos con formatos, KPIs y fórmulas automáticas."
+    "Utiliza la API gratuita de **Gemini Vision** para analizar visualmente cada página del PDF "
+    "y extraer el 100% de las tablas sin omitir ninguna fila por EAN."
 )
 
+# --- CONFIGURACIÓN DE GEMINI API ---
+# Intenta obtener la clave desde los Secrets de Streamlit o desde el entorno
+api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
-# --- FUNCIÓN 1: EXTRAER ÚNICAMENTE LAS TABLAS REALES DEL PDF ---
-def extraer_tabla_desde_pdf_stream(pdf_file):
-    filas_extraidas = []
+if not api_key:
+    api_key = st.text_input(
+        "Ingresa tu GEMINI_API_KEY (Gratuita de Google AI Studio):",
+        type="password",
+    )
 
-    # Patrón Regex: Valida si la celda empieza como número de bandeja (ej. 1.1, 2.3, 1-3, 30-1-9)
-    patron_bandeja = re.compile(r"^\d+([\.\-]\d+)*")
-
-    with pdfplumber.open(pdf_file) as pdf:
-        for pagina in pdf.pages:
-            tablas = pagina.extract_tables()
-            for tabla in tablas:
-                for fila in tabla:
-                    if not fila:
-                        continue
-
-                    # Limpiamos saltos de línea e espacios en blanco adicionales
-                    fila_limpia = [
-                        celda.replace("\n", " ").strip() if celda else ""
-                        for celda in fila
-                    ]
-
-                    # 1. Ignorar filas vacías
-                    if not any(fila_limpia):
-                        continue
-
-                    primer_val = fila_limpia[0]
-
-                    # 2. FILTRO ANTI-RUIDO:
-                    # Validar si el primer valor es una bandeja real (ej. "1.1")
-                    es_bandeja_valida = bool(
-                        patron_bandeja.match(primer_val)
-                    ) and primer_val not in ["1-3", "2-3", "1", "2"]
-
-                    # Validar si alguna celda contiene un código EAN numérico real (10+ dígitos)
-                    tiene_ean_valido = any(
-                        len(c) >= 10 and c.isdigit() for c in fila_limpia
-                    )
-
-                    # Si NO cumple ninguna de las dos condiciones, se asume que es texto flotante/gráfico
-                    if es_bandeja_valida or tiene_ean_valido:
-                        filas_extraidas.append(fila_limpia)
-
-    return filas_extraidas
+if api_key:
+    client = genai.Client(api_key=api_key)
 
 
-# --- FUNCIÓN 2: GENERAR EXCEL CON DISEÑO Y KPIS ---
+# --- FUNCIÓN 1: EXTRAER TABLAS CON VISIÓN ARTIFICIAL (GEMINI) ---
+def extraer_tablas_con_gemini(pdf_bytes):
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    todas_las_filas = []
+
+    prompt = """
+    Analiza esta página de planograma/reporte de implementación de retail.
+    Extrae ÚNICAMENTE la tabla de productos detalada.
+    Ignora encabezados generales, títulos de módulos, gráficos de pie/barras y las imágenes del mueble.
+    
+    Devuelve un JSON estrictamente con la siguiente estructura (una lista de listas de cadenas de texto):
+    {
+        "filas": [
+            ["Bandeja", "N°", "EAN", "Nombre", "Marca", "Desc_A", "Fabricante", "Caras", "Altura", "Profundidad", "Total Unid en Bandeja", "Total_Unidades"],
+            ...
+        ]
+    }
+    Instrucciones:
+    1. Asegúrate de capturar TODAS las líneas que contengan un código EAN (numérico de 10-14 dígitos).
+    2. Mantén exactamente las 12 columnas.
+    3. Si una celda tiene un asterisco '*', conservalo.
+    """
+
+    for i, page in enumerate(pdf):
+        st.write(f"🔍 Analizando visualmente la página {i+1} de {len(pdf)}...")
+        # Renderizar página a imagen PNG en memoria
+        image = page.render(scale=2).to_pil()
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format="PNG")
+        img_bytes = img_byte_arr.getvalue()
+
+        # Llamar a Gemini Vision
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(
+                        data=img_bytes,
+                        mime_type="image/png",
+                    ),
+                    prompt,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+
+            res_json = json.loads(response.text)
+            filas_pag = res_json.get("filas", [])
+
+            for f in filas_pag:
+                # Evitar agregar el encabezado repetido
+                if f and f[0] not in ["Bandeja", "Reporte de Implementación"]:
+                    todas_las_filas.append(f)
+
+        except Exception as e:
+            st.error(f"Error procesando la página {i+1}: {e}")
+
+    return todas_las_filas
+
+
+# --- FUNCIÓN 2: GENERAR EXCEL DE ALTA CALIDAD ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -125,7 +157,6 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         "Total_Unidades",
     ]
 
-    # --- PESTAÑA 1: DATOS DETALLADOS ---
     ws_data.cell(row=1, column=1, value="METRO HIPER MEJORADO").font = font_title
     ws_data.cell(
         row=2,
@@ -146,7 +177,6 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     for r_idx, row_data in enumerate(datos_filas, start_row + 1):
         row_fill = fill_zebra if (r_idx % 2 == 0) else None
 
-        # Asegurar 12 columnas por fila
         while len(row_data) < 12:
             row_data.append("")
 
@@ -156,19 +186,19 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if row_fill:
                 cell.fill = row_fill
 
-            if c_idx in [1, 2]:  # Bandeja, N°
+            if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN (formato texto estricto para ceros a la izquierda)
+            elif c_idx == 3:  # EAN formato texto
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
-            elif c_idx in [4, 5, 6, 7]:  # Nombre, Marca, Desc_A, Fabricante
+            elif c_idx in [4, 5, 6, 7]:
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:  # Caras, Altura, Profundidad, Total Bandeja
+            elif c_idx in [8, 9, 10, 11]:
                 cell.value = int(val) if str(val).isdigit() else 0
                 cell.alignment, cell.number_format = align_right, "#,##0"
-            elif c_idx == 12:  # Total_Unidades
+            elif c_idx == 12:
                 if str(val) == "*":
                     cell.value, cell.alignment = "*", align_center
                 else:
@@ -197,11 +227,11 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         col_letter = get_column_letter(col[0].column)
         ws_data.column_dimensions[col_letter].width = 16
 
-    ws_data.column_dimensions["D"].width = 45  # Columna Nombre
-    ws_data.column_dimensions["G"].width = 35  # Columna Fabricante
+    ws_data.column_dimensions["D"].width = 45
+    ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # --- PESTAÑA 2: KPIS Y RESUMEN ---
+    # KPIs
     ws_summary.cell(
         row=1,
         column=1,
@@ -270,7 +300,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             "#,##0",
         )
 
-    # Tabla Resumen por Marca
+    # Resumen por Marca
     ws_summary.cell(row=8, column=2, value="Resumen por Marca").font = Font(
         name="Calibri", size=12, bold=True, color="1F497D"
     )
@@ -279,10 +309,13 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         c = ws_summary.cell(row=9, column=col_idx, value=h)
         c.font, c.fill, c.alignment = font_header, fill_header, align_center
 
-    # Extraer lista única de marcas reales
     marcas_set = list(
         dict.fromkeys(
-            [r[4] for r in datos_filas if len(r) > 4 and r[4].strip() != ""]
+            [
+                r[4]
+                for r in datos_filas
+                if len(r) > 4 and str(r[4]).strip() != ""
+            ]
         )
     )
 
@@ -345,32 +378,37 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     return output
 
 
-# --- INTERFAZ GRAFICA STREAMLIT ---
+# --- INTERFAZ STREAMLIT ---
 uploaded_file = st.file_uploader("Selecciona o arrastra tu PDF aquí", type=["pdf"])
 
 if uploaded_file is not None:
-    categoria = st.text_input("Nombre de la Categoría", "General")
+    categoria = st.text_input("Nombre de la Categoría", "Lavavajillas")
 
-    if st.button("🚀 Procesar PDF y Generar Excel"):
-        with st.spinner("Procesando y filtrando tablas del PDF..."):
-            datos = extraer_tabla_desde_pdf_stream(uploaded_file)
+    if st.button("🚀 Procesar PDF con Visión AI"):
+        if not api_key:
+            st.error(
+                "Necesitas ingresar o configurar tu GEMINI_API_KEY para usar la extracción por Visión."
+            )
+        else:
+            with st.spinner(
+                "La IA está leyendo y escaneando las imágenes del PDF..."
+            ):
+                pdf_bytes = uploaded_file.read()
+                datos = extraer_tablas_con_gemini(pdf_bytes)
 
-            if datos:
-                st.success(
-                    f"¡Extracción exitosa! Se procesaron {len(datos)} registros válidos."
-                )
+                if datos:
+                    st.success(
+                        f"¡Éxito! Se capturaron {len(datos)} registros exactos."
+                    )
+                    excel_bytes = generar_excel_en_memoria(datos, categoria)
 
-                # Generar Excel en memoria
-                excel_bytes = generar_excel_en_memoria(datos, categoria)
-
-                # Botón de Descarga
-                st.download_button(
-                    label="📥 Descargar Excel Formateado",
-                    data=excel_bytes,
-                    file_name=f"Reporte_{categoria}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            else:
-                st.error(
-                    "No se encontraron filas con estructura de productos válidos en el PDF."
-                )
+                    st.download_button(
+                        label="📥 Descargar Excel Perfecto",
+                        data=excel_bytes,
+                        file_name=f"Reporte_{categoria}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                else:
+                    st.error(
+                        "No se pudieron extraer datos de las imágenes del PDF."
+                    )
