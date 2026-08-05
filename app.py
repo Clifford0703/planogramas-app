@@ -24,20 +24,20 @@ st.sidebar.write("**Autor:** Alfredo HM")
 st.sidebar.write("**Estado:** Listo para procesar")
 
 
-# --- ALGORITMO ROBUSTO DE EXTRACCIÓN POR BLOQUES DE COLUMNA Y COORDENADAS ---
+# --- ALGORITMO CORREGIDO DE EXTRACCIÓN POR LÍNEAS Y COORDENADAS ---
 def extraer_tabla_robusta_pdf(pdf_file):
     datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
 
     with pdfplumber.open(pdf_file) as pdf:
-        for num_pag, pagina in enumerate(pdf.pages, 1):
+        for pagina in pdf.pages:
             words = pagina.extract_words(
                 x_tolerance=3, y_tolerance=3, keep_blank_chars=False
             )
             if not words:
                 continue
 
-            # 1. Agrupar palabras por renglón vertical (coordenada Y / top)
+            # 1. Agrupar palabras por renglón horizontal (coordenada Y)
             lineas_dict = {}
             for w in words:
                 y_pos = round(w["top"], 1)
@@ -70,41 +70,40 @@ def extraer_tabla_robusta_pdf(pdf_file):
             if not filas_con_ean:
                 continue
 
-            # 3. Mapear cada elemento de la fila por límites de columna
-            # Definir rangos adaptativos por X según la maquetación del PDF
             width = pagina.width
 
+            # 3. Asignar palabras respetando el orden horizontal estricto
             for i, (y_pos, words_linea, ean_val) in enumerate(filas_con_ean):
                 col = [""] * 12
 
-                # Arrays para capturar textos de celdas multilínea o compuestas
                 txt_nombre = []
                 txt_marca = []
                 txt_desc = []
                 txt_fabricante = []
 
-                # Si hay palabras en líneas inmediatamente inferiores dentro del mismo bloque de fila,
-                # las agrupamos (soporte para celdas multilínea de Nombre, Marca, Desc_A, Fabricante)
+                # Bloque de la fila actual (incluye multilíneas)
                 y_siguiente = (
                     filas_con_ean[i + 1][0]
                     if i + 1 < len(filas_con_ean)
                     else y_pos + 45.0
                 )
 
-                # Buscar todas las palabras pertenecientes al bloque de esta fila
                 words_bloque = [
                     w
                     for y_k in lineas_dict.keys()
                     if y_pos <= y_k < y_siguiente
                     for w in lineas_dict[y_k]
                 ]
-                words_bloque = sorted(words_bloque, key=lambda w: (w["x0"]))
+                # Ordenar por Y primero (línea por línea) y luego por X (izquierda a derecha)
+                words_bloque = sorted(
+                    words_bloque, key=lambda w: (round(w["top"], 1), w["x0"])
+                )
 
                 for w in words_bloque:
                     x_rel = w["x0"] / width
                     text = w["text"]
 
-                    # Asignación estricta por rangos de columna
+                    # Rangos horizontales calibrados
                     if x_rel < 0.075:
                         if not col[0]:
                             col[0] = text
@@ -118,31 +117,35 @@ def extraer_tabla_robusta_pdf(pdf_file):
                             col[2] = text
                         elif not col[2] and text.isdigit():
                             col[2] = text
-                    elif x_rel < 0.34:
+                    elif x_rel < 0.38:
+                        # Columna Nombre (Ampliada para no cortar el título del producto)
                         txt_nombre.append(text)
-                    elif x_rel < 0.44:
+                    elif x_rel < 0.46:
+                        # Columna Marca
                         txt_marca.append(text)
-                    elif x_rel < 0.54:
+                    elif x_rel < 0.56:
+                        # Columna Desc_A
                         txt_desc.append(text)
-                    elif x_rel < 0.68:
+                    elif x_rel < 0.70:
+                        # Columna Fabricante
                         txt_fabricante.append(text)
-                    elif x_rel < 0.73:
+                    elif x_rel < 0.74:
                         if not col[7] and (text.isdigit() or text == "*"):
                             col[7] = text
-                    elif x_rel < 0.79:
+                    elif x_rel < 0.80:
                         if not col[8] and (text.isdigit() or text == "*"):
                             col[8] = text
-                    elif x_rel < 0.85:
+                    elif x_rel < 0.86:
                         if not col[9] and (text.isdigit() or text == "*"):
                             col[9] = text
-                    elif x_rel < 0.92:
+                    elif x_rel < 0.93:
                         if not col[10] and (text.isdigit() or text == "*"):
                             col[10] = text
                     else:
                         if not col[11] and (text.isdigit() or text == "*"):
                             col[11] = text
 
-                # Consolidar cadenas de texto multilínea sin duplicados
+                # Consolidación de textos
                 col[3] = " ".join(txt_nombre).strip()
                 col[4] = " ".join(txt_marca).strip()
                 col[5] = " ".join(txt_desc).strip()
@@ -151,19 +154,12 @@ def extraer_tabla_robusta_pdf(pdf_file):
                 if not col[2]:
                     col[2] = ean_val
 
-                # Corrección secundaria: Si Marca o Desc_A se capturaron juntas en la columna Nombre,
-                # limpiamos la información compartida
-                if col[4] and col[4] in col[3]:
-                    col[3] = col[3].replace(col[4], "").strip()
-                if col[5] and col[5] in col[4]:
-                    col[4] = col[4].replace(col[5], "").strip()
-
                 datos_procesados.append(col)
 
     return datos_procesados
 
 
-# --- FUNCIÓN PARA GENERAR EL LIBRO EXCEL ---
+# --- FUNCIÓN DE GENERACIÓN DE EXCEL ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -254,16 +250,16 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN (texto)
+            elif c_idx == 3:
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
-            elif c_idx in [4, 5, 6, 7]:  # Nombre, Marca, Desc_A, Fabricante
+            elif c_idx in [4, 5, 6, 7]:
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:  # Números
+            elif c_idx in [8, 9, 10, 11]:
                 cell.value = int(val) if str(val).isdigit() else 0
                 cell.alignment, cell.number_format = align_right, "#,##0"
-            elif c_idx == 12:  # Total_Unidades
+            elif c_idx == 12:
                 if str(val) == "*":
                     cell.value, cell.alignment = "*", align_center
                 else:
@@ -296,7 +292,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # --- PESTAÑA KPIS Y RESUMEN ---
+    # PESTAÑA KPIS Y RESUMEN
     ws_summary.cell(
         row=1,
         column=1,
