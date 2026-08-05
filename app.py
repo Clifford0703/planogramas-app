@@ -10,17 +10,27 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-# --- CONFIGURACIÓN DE STREAMLIT ---
+# --- CONSTANTES ---
+APP_VERSION = "v3.2.0-PRO-VISION"
+
+# --- CONFIGURACIÓN DE PÁGINA STREAMLIT ---
 st.set_page_config(
-    page_title="Convertidor Inteligente de Planogramas",
+    page_title=f"Convertidor Inteligente de Planogramas ({APP_VERSION})",
     page_icon="📊",
     layout="wide",
 )
 
+# Indicador visual de versión en la barra lateral
+st.sidebar.title("📌 Información")
+st.sidebar.info(f"**Versión de la App:** `{APP_VERSION}`")
+st.sidebar.caption(
+    "Motor: Google Gemini 2.0 Flash (Visión Artificial) + OpenPyXL"
+)
+
 st.title("📊 Procesador Multimodal de Planogramas (PDF ➔ Excel)")
 st.write(
-    "Utiliza la API de **Gemini Vision** para analizar visualmente cada página del PDF "
-    "y extraer el 100% de las tablas sin omitir ninguna fila por EAN."
+    f"Utiliza **Gemini 2.0 Flash Vision** para analizar visualmente cada página del PDF "
+    f"y extraer el 100% de las filas de productos por EAN sin omitir datos. *(Versión activa: **{APP_VERSION}**)*"
 )
 
 # --- CONFIGURACIÓN DE GEMINI API ---
@@ -32,11 +42,12 @@ if not api_key:
         type="password",
     )
 
+client = None
 if api_key:
     client = genai.Client(api_key=api_key)
 
 
-# --- FUNCIÓN 1: EXTRAER TABLAS CON VISIÓN ARTIFICIAL (GEMINI) ---
+# --- FUNCIÓN 1: EXTRAER TABLAS CON VISIÓN ARTIFICIAL (GEMINI 2.0) ---
 def extraer_tablas_con_gemini(pdf_bytes):
     pdf = pdfium.PdfDocument(pdf_bytes)
     todas_las_filas = []
@@ -64,7 +75,7 @@ def extraer_tablas_con_gemini(pdf_bytes):
 
     for i, page in enumerate(pdf):
         st.write(
-            f"🔍 Analizando visualmente página {i+1} de {total_paginas}..."
+            f"🔍 **[Página {i+1} de {total_paginas}]** Escaneando visualmente..."
         )
 
         # Renderizar página a imagen PNG en memoria
@@ -73,44 +84,61 @@ def extraer_tablas_con_gemini(pdf_bytes):
         image.save(img_byte_arr, format="PNG")
         img_bytes = img_byte_arr.getvalue()
 
-        # Llamar a Gemini Vision usando el modelo activo gemini-1.5-flash
-        try:
-            response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=[
-                    types.Part.from_bytes(
-                        data=img_bytes,
-                        mime_type="image/png",
+        # Intentar llamada a Gemini 2.0 Flash con reintentos para Rate Limit
+        exito = False
+        intentos = 0
+
+        while not exito and intentos < 3:
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[
+                        types.Part.from_bytes(
+                            data=img_bytes,
+                            mime_type="image/png",
+                        ),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
                     ),
-                    prompt,
-                ],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
+                )
 
-            res_json = json.loads(response.text)
-            filas_pag = res_json.get("filas", [])
+                res_json = json.loads(response.text)
+                filas_pag = res_json.get("filas", [])
 
-            for f in filas_pag:
-                # Evitar agregar encabezados repetidos
-                if f and f[0] not in ["Bandeja", "Reporte de Implementación"]:
-                    todas_las_filas.append(f)
+                for f in filas_pag:
+                    if f and f[0] not in [
+                        "Bandeja",
+                        "Reporte de Implementación",
+                    ]:
+                        todas_las_filas.append(f)
 
-        except Exception as e:
-            st.error(f"Error procesando la página {i+1}: {e}")
+                exito = True
 
-        # Actualizar progreso
+            except Exception as e:
+                intentos += 1
+                mensaje_err = str(e)
+
+                if "429" in mensaje_err or "RESOURCE_EXHAUSTED" in mensaje_err:
+                    st.warning(
+                        f"⏳ Pausa por límite de frecuencia en página {i+1}. Reintentando en 12 segundos..."
+                    )
+                    time.sleep(12)
+                else:
+                    st.error(f"❌ Error en página {i+1}: {e}")
+                    break
+
         barra_progreso.progress((i + 1) / total_paginas)
 
-        # Pausa estratégica para no superar el límite gratuito de 5 peticiones por minuto (RPM)
+        # Pausa ligera para mantenerte en la cuota gratuita
         if i < total_paginas - 1:
-            time.sleep(13)
+            time.sleep(4)
 
     return todas_las_filas
 
 
-# --- FUNCIÓN 2: GENERAR EXCEL DE ALTA CALIDAD ---
+# --- FUNCIÓN 2: GENERAR EXCEL FORMATO EJECUTIVO ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -170,6 +198,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         "Total_Unidades",
     ]
 
+    # --- PESTAÑA 1: DATOS DETALLADOS ---
     ws_data.cell(row=1, column=1, value="METRO HIPER MEJORADO").font = font_title
     ws_data.cell(
         row=2,
@@ -202,7 +231,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             if c_idx in [1, 2]:
                 cell.value = str(val) if val != "" else ""
                 cell.alignment = align_center
-            elif c_idx == 3:  # EAN formato texto
+            elif c_idx == 3:  # EAN formato texto estricto
                 cell.value = str(val)
                 cell.alignment, cell.number_format = align_center, "@"
             elif c_idx in [4, 5, 6, 7]:
@@ -244,7 +273,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # KPIs
+    # --- PESTAÑA 2: KPIS Y RESUMEN ---
     ws_summary.cell(
         row=1,
         column=1,
@@ -392,15 +421,17 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
 
 
 # --- INTERFAZ STREAMLIT ---
-uploaded_file = st.file_uploader("Selecciona o arrastra tu PDF aquí", type=["pdf"])
+uploaded_file = st.file_uploader(
+    "Selecciona o arrastra tu PDF de Planograma aquí", type=["pdf"]
+)
 
 if uploaded_file is not None:
     categoria = st.text_input("Nombre de la Categoría", "Lavavajillas")
 
     if st.button("🚀 Procesar PDF con Visión AI"):
-        if not api_key:
+        if not client:
             st.error(
-                "Necesitas ingresar o configurar tu GEMINI_API_KEY para usar la extracción por Visión."
+                "Necesitas configurar tu GEMINI_API_KEY en los Secrets para procesar el archivo."
             )
         else:
             with st.spinner(
@@ -418,10 +449,16 @@ if uploaded_file is not None:
                     st.download_button(
                         label="📥 Descargar Excel Perfecto",
                         data=excel_bytes,
-                        file_name=f"Reporte_{categoria}.xlsx",
+                        file_name=f"Reporte_{categoria}_{APP_VERSION}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 else:
                     st.error(
                         "No se pudieron extraer datos de las imágenes del PDF."
                     )
+
+# --- PIE DE PÁGINA CON VERSIÓN ---
+st.markdown("---")
+st.caption(
+    f"🟢 **Estado del Sistema:** Operativo | **Versión:** `{APP_VERSION}` | Motor Gemini 2.0 Active"
+)
