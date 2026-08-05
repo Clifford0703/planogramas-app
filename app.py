@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("📊 Convertidor de Planogramas a Excel")
 st.write(
     "Sube tu archivo PDF de implementación para estructurar las celdas "
-    "con delimitación geométrica exacta y captura precisa de columnas numéricas."
+    "garantizando la extracción completa de las 12 columnas (incluyendo las últimas 2 columnas de totales)."
 )
 
 st.sidebar.title("📌 Información")
@@ -24,7 +24,7 @@ st.sidebar.write("**Autor:** Alfredo HM")
 st.sidebar.write("**Estado:** Listo para procesar")
 
 
-# --- ALGORITMO STRICTO CON CAPTURA EXACTA DE NUMÉRICOS ---
+# --- ALGORITMO STRICTO CON LECTURA COMPLETA DE ANCHO DE PÁGINA ---
 def extraer_tabla_geometria_estricta(pdf_file):
     datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
@@ -37,9 +37,10 @@ def extraer_tabla_geometria_estricta(pdf_file):
             if not words:
                 continue
 
-            # 1. IDENTIFICAR COORDENADAS X_0 DE LOS 12 ENCABEZADOS (Soporte multilínea)
-            cabecera_words = [w for w in words if w["top"] < 240]
+            width = pagina.width
 
+            # 1. IDENTIFICAR COORDENADAS X_0 DE LOS ENCABEZADOS (Soporte multilínea)
+            cabecera_words = [w for w in words if w["top"] < 240]
             encabezados_x = {}
 
             for w in cabecera_words:
@@ -66,36 +67,35 @@ def extraer_tabla_geometria_estricta(pdf_file):
                     encabezados_x["alt"] = x0
                 elif "prof" in txt and "prof" not in encabezados_x:
                     encabezados_x["prof"] = x0
-                elif "unid" in txt and "unid_band" not in encabezados_x and x0 > 550:
+                elif "unid" in txt and "unid_band" not in encabezados_x and x0 > (width * 0.70):
                     encabezados_x["unid_band"] = x0
-                elif ("tot" in txt or "unidad" in txt) and "tot_unid" not in encabezados_x and x0 > 650:
+                elif ("tot" in txt or "unidad" in txt) and "tot_unid" not in encabezados_x and x0 > (width * 0.85):
                     encabezados_x["tot_unid"] = x0
 
-            width = pagina.width
+            # Límites por defecto proporcionales al ancho total del documento
             list_x = [
-                encabezados_x.get("bandeja", 11.5),
-                encabezados_x.get("num", 70.1),
-                encabezados_x.get("ean", 91.2),
-                encabezados_x.get("nombre", 169.9),
-                encabezados_x.get("marca", 273.6),
-                encabezados_x.get("desc", 349.4),
-                encabezados_x.get("fab", 430.1),
-                encabezados_x.get("caras", 505.0),
-                encabezados_x.get("alt", 551.0),
-                encabezados_x.get("prof", 597.1),
-                encabezados_x.get("unid_band", 642.2),
-                encabezados_x.get("tot_unid", 700.8),
-                width,
+                encabezados_x.get("bandeja", 0.01 * width),
+                encabezados_x.get("num", 0.08 * width),
+                encabezados_x.get("ean", 0.12 * width),
+                encabezados_x.get("nombre", 0.22 * width),
+                encabezados_x.get("marca", 0.36 * width),
+                encabezados_x.get("desc", 0.46 * width),
+                encabezados_x.get("fab", 0.58 * width),
+                encabezados_x.get("caras", 0.67 * width),
+                encabezados_x.get("alt", 0.73 * width),
+                encabezados_x.get("prof", 0.79 * width),
+                encabezados_x.get("unid_band", 0.86 * width),
+                encabezados_x.get("tot_unid", 0.94 * width),
+                width,  # Límite completo de la página
             ]
 
-            # Ordenar coordenadas estrictamente de izquierda a derecha
             list_x = sorted(list_x)
 
             # 2. DEFINIR RANGOS X DE CADA COLUMNA
             limites_columnas = []
             for col_idx in range(12):
                 x_start = list_x[col_idx] - 2.0
-                x_end = list_x[col_idx + 1] - 2.0
+                x_end = list_x[col_idx + 1] - 2.0 if col_idx < 11 else width + 10.0
                 limites_columnas.append((x_start, x_end))
 
             # 3. IDENTIFICAR FILAS POR BANDEJA / EAN
@@ -126,7 +126,7 @@ def extraer_tabla_geometria_estricta(pdf_file):
             if not filas_inicio:
                 continue
 
-            # 4. EXTRACCIÓN Y LIMPIEZA POR CELDA
+            # 4. EXTRACCIÓN Y RETENCIÓN EXACTA DE LAS 12 COLUMNAS
             for i, (y_inicio, ean_codigo) in enumerate(filas_inicio):
                 y_fin = (
                     filas_inicio[i + 1][0]
@@ -154,7 +154,6 @@ def extraer_tabla_geometria_estricta(pdf_file):
                         row_12_cols[c_idx] = ""
                         continue
 
-                    # Agrupar renglones dentro de la celda
                     renglones_celda = {}
                     for w in words_celda:
                         y_r = round(w["top"], 1)
@@ -179,16 +178,44 @@ def extraer_tabla_geometria_estricta(pdf_file):
 
                     val_raw = " ".join(lineas_texto).strip()
 
-                    # REGLA ESPECIAL PARA COLUMNAS NUMÉRICAS (7 a 11 -> Caras, Altura, Prof, Total Unid, Total Unidades)
+                    # REGISTRO DE ASTERISCOS Y VALORES NUMÉRICOS
                     if c_idx >= 7:
-                        # Extraer solo dígitos o asterisco
-                        nums = re.findall(r"\d+|\*", val_raw)
-                        row_12_cols[c_idx] = nums[0] if nums else "0"
+                        if "*" in val_raw:
+                            row_12_cols[c_idx] = "*"
+                        else:
+                            nums = re.findall(r"\d+", val_raw)
+                            row_12_cols[c_idx] = nums[0] if nums else ""
                     else:
                         row_12_cols[c_idx] = val_raw
 
                 if not row_12_cols[2] or not patron_ean.match(row_12_cols[2]):
                     row_12_cols[2] = ean_codigo
+
+                # RESPALDO DE SEGURIDAD: Si la columna 11 (Total_Unidades) o 10 (Total Unid en Bandeja) quedaron vacías,
+                # escaneamos todos los bloques numéricos del extremo derecho de la fila
+                words_derecha = sorted(
+                    [w for w in words_item if w["x0"] > (width * 0.65)],
+                    key=lambda x: x["x0"]
+                )
+                
+                # Extraer todos los valores finales (números o asteriscos)
+                valores_derecha = []
+                for w in words_derecha:
+                    txt = w["text"].strip()
+                    if txt.isdigit() or txt == "*":
+                        valores_derecha.append(txt)
+
+                # Si tenemos valores a la derecha, aseguramos las últimas columnas
+                if len(valores_derecha) >= 1 and not row_12_cols[11]:
+                    row_12_cols[11] = valores_derecha[-1]
+                if len(valores_derecha) >= 2 and not row_12_cols[10]:
+                    row_12_cols[10] = valores_derecha[-2]
+                if len(valores_derecha) >= 3 and not row_12_cols[9]:
+                    row_12_cols[9] = valores_derecha[-3]
+                if len(valores_derecha) >= 4 and not row_12_cols[8]:
+                    row_12_cols[8] = valores_derecha[-4]
+                if len(valores_derecha) >= 5 and not row_12_cols[7]:
+                    row_12_cols[7] = valores_derecha[-5]
 
                 datos_procesados.append(row_12_cols)
 
@@ -292,15 +319,17 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             elif c_idx in [4, 5, 6, 7]:  # Textos
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:  # Números enteros
-                cell.value = int(val) if str(val).isdigit() else 0
-                cell.alignment, cell.number_format = align_right, "#,##0"
-            elif c_idx == 12:  # Total_Unidades (soporta '*')
-                if str(val) == "*":
-                    cell.value, cell.alignment = "*", align_center
-                else:
-                    cell.value = int(val) if str(val).isdigit() else 0
+            elif c_idx in [8, 9, 10, 11, 12]:  # Columnas Numéricas o Asterisco
+                val_str = str(val).strip()
+                if val_str == "*":
+                    cell.value = "*"
+                    cell.alignment = align_center
+                elif val_str.isdigit():
+                    cell.value = int(val_str)
                     cell.alignment, cell.number_format = align_right, "#,##0"
+                else:
+                    cell.value = val_str
+                    cell.alignment = align_center
 
     tot_row = len(datos_filas) + start_row + 1
     ws_data.cell(row=tot_row, column=4, value="TOTAL GENERAL").font = font_bold
@@ -487,7 +516,7 @@ if uploaded_file is not None:
 
             if datos:
                 st.success(
-                    f"¡Listo! Se extrajeron {len(datos)} filas con valores numéricos y texto en formato correcto."
+                    f"¡Listo! Se extrajeron {len(datos)} filas con las 12 columnas y totales completos."
                 )
 
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
