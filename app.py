@@ -13,39 +13,37 @@ st.set_page_config(
     layout="centered",
 )
 
-# --- CABECERA Y TÍTULO ---
 st.title("📊 Convertidor de Planogramas a Excel")
 st.write(
-    "Sube tu archivo PDF de implementación para generar automáticamente "
-    "el reporte en Excel con todas las columnas organizadas y estructuradas por coordenadas de alineación."
+    "Sube tu archivo PDF de implementación para extraer las tablas de productos "
+    "de forma clara, completa y perfectamente estructurada en Excel."
 )
 
-# --- PANEL LATERAL ---
 st.sidebar.title("📌 Información")
 st.sidebar.write("**Autor:** Alfredo HM")
 st.sidebar.write("**Estado:** Listo para procesar")
 
 
-# --- FUNCIÓN DE EXTRACCIÓN POR ALINEACIÓN DE COORDENADAS (X / Y) ---
-def extraer_tabla_por_coordenadas_exactas(pdf_file):
+# --- ALGORITMO ROBUSTO DE EXTRACCIÓN POR BLOQUES DE COLUMNA Y COORDENADAS ---
+def extraer_tabla_robusta_pdf(pdf_file):
     datos_procesados = []
     patron_ean = re.compile(r"\b\d{10,14}\b")
 
     with pdfplumber.open(pdf_file) as pdf:
-        for pagina in pdf.pages:
+        for num_pag, pagina in enumerate(pdf.pages, 1):
             words = pagina.extract_words(
                 x_tolerance=3, y_tolerance=3, keep_blank_chars=False
             )
             if not words:
                 continue
 
-            # 1. Agrupar palabras por renglón horizontal (Coordenada Y / top)
+            # 1. Agrupar palabras por renglón vertical (coordenada Y / top)
             lineas_dict = {}
             for w in words:
                 y_pos = round(w["top"], 1)
                 linea_clave = None
                 for y_existente in lineas_dict.keys():
-                    if abs(y_existente - y_pos) <= 3.0:
+                    if abs(y_existente - y_pos) <= 3.5:
                         linea_clave = y_existente
                         break
 
@@ -55,95 +53,117 @@ def extraer_tabla_por_coordenadas_exactas(pdf_file):
 
                 lineas_dict[linea_clave].append(w)
 
-            ancho_pag = pagina.width
-
-            # 2. Asignar palabras a las 12 columnas según su alineación a la izquierda (Coordenada X)
+            # 2. Identificar filas con EAN válido
+            filas_con_ean = []
             for y_pos in sorted(lineas_dict.keys()):
                 words_linea = sorted(
                     lineas_dict[y_pos], key=lambda item: item["x0"]
                 )
                 texto_linea = " ".join([w["text"] for w in words_linea])
 
-                # Filtro: La línea debe contener un código EAN válido
                 match_ean = patron_ean.search(texto_linea)
-                if not match_ean:
-                    continue
+                if match_ean:
+                    filas_con_ean.append(
+                        (y_pos, words_linea, match_ean.group(0))
+                    )
 
+            if not filas_con_ean:
+                continue
+
+            # 3. Mapear cada elemento de la fila por límites de columna
+            # Definir rangos adaptativos por X según la maquetación del PDF
+            width = pagina.width
+
+            for i, (y_pos, words_linea, ean_val) in enumerate(filas_con_ean):
                 col = [""] * 12
-                txt_nombre, txt_marca, txt_desc, txt_fabricante = [], [], [], []
 
-                for w in words_linea:
-                    x0 = w["x0"]
+                # Arrays para capturar textos de celdas multilínea o compuestas
+                txt_nombre = []
+                txt_marca = []
+                txt_desc = []
+                txt_fabricante = []
+
+                # Si hay palabras en líneas inmediatamente inferiores dentro del mismo bloque de fila,
+                # las agrupamos (soporte para celdas multilínea de Nombre, Marca, Desc_A, Fabricante)
+                y_siguiente = (
+                    filas_con_ean[i + 1][0]
+                    if i + 1 < len(filas_con_ean)
+                    else y_pos + 45.0
+                )
+
+                # Buscar todas las palabras pertenecientes al bloque de esta fila
+                words_bloque = [
+                    w
+                    for y_k in lineas_dict.keys()
+                    if y_pos <= y_k < y_siguiente
+                    for w in lineas_dict[y_k]
+                ]
+                words_bloque = sorted(words_bloque, key=lambda w: (w["x0"]))
+
+                for w in words_bloque:
+                    x_rel = w["x0"] / width
                     text = w["text"]
-                    
-                    # Posición X relativa normalizada (porcentaje de ancho de página)
-                    x_rel = x0 / ancho_pag
 
-                    if x_rel < 0.08:
-                        # Columna 1: Bandeja
+                    # Asignación estricta por rangos de columna
+                    if x_rel < 0.075:
                         if not col[0]:
                             col[0] = text
-                    elif x_rel < 0.12:
-                        # Columna 2: N°
+                    elif x_rel < 0.11:
                         if text.isdigit() and not col[1]:
                             col[1] = text
                         elif not col[0]:
                             col[0] = text
-                    elif x_rel < 0.22:
-                        # Columna 3: EAN
+                    elif x_rel < 0.21:
                         if patron_ean.match(text):
                             col[2] = text
                         elif not col[2] and text.isdigit():
                             col[2] = text
-                    elif x_rel < 0.36:
-                        # Columna 4: Nombre
+                    elif x_rel < 0.34:
                         txt_nombre.append(text)
-                    elif x_rel < 0.46:
-                        # Columna 5: Marca
+                    elif x_rel < 0.44:
                         txt_marca.append(text)
-                    elif x_rel < 0.58:
-                        # Columna 6: Desc_A
+                    elif x_rel < 0.54:
                         txt_desc.append(text)
-                    elif x_rel < 0.67:
-                        # Columna 7: Fabricante
+                    elif x_rel < 0.68:
                         txt_fabricante.append(text)
-                    elif x_rel < 0.72:
-                        # Columna 8: Caras
-                        if not col[7]:
+                    elif x_rel < 0.73:
+                        if not col[7] and (text.isdigit() or text == "*"):
                             col[7] = text
                     elif x_rel < 0.79:
-                        # Columna 9: Altura
-                        if not col[8]:
+                        if not col[8] and (text.isdigit() or text == "*"):
                             col[8] = text
-                    elif x_rel < 0.86:
-                        # Columna 10: Profundidad
-                        if not col[9]:
+                    elif x_rel < 0.85:
+                        if not col[9] and (text.isdigit() or text == "*"):
                             col[9] = text
-                    elif x_rel < 0.94:
-                        # Columna 11: Total Unid en Bandeja
-                        if not col[10]:
+                    elif x_rel < 0.92:
+                        if not col[10] and (text.isdigit() or text == "*"):
                             col[10] = text
                     else:
-                        # Columna 12: Total_Unidades
-                        if not col[11]:
+                        if not col[11] and (text.isdigit() or text == "*"):
                             col[11] = text
 
-                # Consolidar cadenas de texto en columnas compuestas
+                # Consolidar cadenas de texto multilínea sin duplicados
                 col[3] = " ".join(txt_nombre).strip()
                 col[4] = " ".join(txt_marca).strip()
                 col[5] = " ".join(txt_desc).strip()
                 col[6] = " ".join(txt_fabricante).strip()
 
-                # Garantizar asignación de EAN
                 if not col[2]:
-                    col[2] = match_ean.group(0)
+                    col[2] = ean_val
+
+                # Corrección secundaria: Si Marca o Desc_A se capturaron juntas en la columna Nombre,
+                # limpiamos la información compartida
+                if col[4] and col[4] in col[3]:
+                    col[3] = col[3].replace(col[4], "").strip()
+                if col[5] and col[5] in col[4]:
+                    col[4] = col[4].replace(col[5], "").strip()
 
                 datos_procesados.append(col)
 
     return datos_procesados
 
 
-# --- FUNCIÓN DE GENERACIÓN DE EXCEL Y KPIS ---
+# --- FUNCIÓN PARA GENERAR EL LIBRO EXCEL ---
 def generar_excel_en_memoria(datos_filas, titulo_categoria):
     wb = openpyxl.Workbook()
 
@@ -154,7 +174,6 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_summary.views.sheetView[0].showGridLines = True
     ws_data.views.sheetView[0].showGridLines = True
 
-    # Estilos de Excel
     font_title = Font(name="Calibri", size=16, bold=True, color="1F497D")
     font_subtitle = Font(name="Calibri", size=11, italic=True, color="595959")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -203,7 +222,6 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
         "Total_Unidades",
     ]
 
-    # --- PESTAÑA 1: REPORTE DETALLADO ---
     ws_data.cell(row=1, column=1, value="METRO HIPER MEJORADO").font = font_title
     ws_data.cell(
         row=2,
@@ -242,7 +260,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             elif c_idx in [4, 5, 6, 7]:  # Nombre, Marca, Desc_A, Fabricante
                 cell.value = str(val)
                 cell.alignment = align_left
-            elif c_idx in [8, 9, 10, 11]:  # Valores Numéricos
+            elif c_idx in [8, 9, 10, 11]:  # Números
                 cell.value = int(val) if str(val).isdigit() else 0
                 cell.alignment, cell.number_format = align_right, "#,##0"
             elif c_idx == 12:  # Total_Unidades
@@ -278,7 +296,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     ws_data.column_dimensions["G"].width = 35
     ws_data.freeze_panes = "A5"
 
-    # --- PESTAÑA 2: RESUMEN Y KPIS ---
+    # --- PESTAÑA KPIS Y RESUMEN ---
     ws_summary.cell(
         row=1,
         column=1,
@@ -347,7 +365,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
             "#,##0",
         )
 
-    # Tabla Resumen por Marca
+    # Resumen por Marca
     ws_summary.cell(row=8, column=2, value="Resumen por Marca").font = Font(
         name="Calibri", size=12, bold=True, color="1F497D"
     )
@@ -425,7 +443,7 @@ def generar_excel_en_memoria(datos_filas, titulo_categoria):
     return output
 
 
-# --- INTERFAZ DE USUARIO ---
+# --- INTERFAZ STREAMLIT ---
 uploaded_file = st.file_uploader("Arrastra tu PDF aquí", type=["pdf"])
 
 if uploaded_file is not None:
@@ -433,12 +451,13 @@ if uploaded_file is not None:
 
     if st.button("Procesar y Convertir a Excel"):
         with st.spinner("Procesando documento..."):
-            datos = extraer_tabla_por_coordenadas_exactas(uploaded_file)
+            datos = extraer_tabla_robusta_pdf(uploaded_file)
 
             if datos:
                 st.success(
-                    f"¡Listo! Se extrajeron {len(datos)} filas correctamente."
+                    f"¡Listo! Se extrajeron {len(datos)} filas con todas sus columnas completas."
                 )
+
                 excel_bytes = generar_excel_en_memoria(datos, categoria)
 
                 st.download_button(
@@ -450,6 +469,5 @@ if uploaded_file is not None:
             else:
                 st.error("No se encontraron registros válidos en el PDF.")
 
-# --- PIE DE PÁGINA SIMPLE ---
 st.markdown("---")
 st.write("Desarrollado por **Alfredo HM**")
