@@ -20,8 +20,8 @@ st.sidebar.caption("Versión 2.4.0")
 
 
 # --- INTERFAZ PRINCIPAL ---
-st.title("✨ PDF Table Extractor")
-st.markdown("Carga tu archivo PDF para exportar las tablas directamente a Excel.")
+st.title("✨ PDF Table Extractor - Planogramas")
+st.markdown("Carga un archivo PDF para exportar las tablas directamente a Excel.")
 st.markdown("---")
 
 
